@@ -1,0 +1,8 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    "/^npm install --save-dev electron && npx electron --version$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "multitasker-slack-connector",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Slack Socket Mode connector for Multitasker notifications.",
+  "type": "commonjs",
+  "scripts": {
+    "auth": "node src\\slack-oauth.js",
+    "start": "node src\\slack-socket.js",
+    "check": "node --check src\\slack-socket.js && node --check src\\slack-oauth.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

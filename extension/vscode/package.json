@@ -1,0 +1,70 @@
+{
+  "name": "vscode-companion",
+  "displayName": "Multitasker VS Code Companion",
+  "description": "Local companion extension that opens Multitasker sessions in VS Code terminals.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/multitasker/vscode-companion.git",
+    "directory": ""
+  },
+  "version": "0.0.14",
+  "private": true,
+  "publisher": "multitasker",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:multitasker.startSession",
+    "onCommand:multitasker.attachTerminal",
+    "onCommand:multitasker.disconnectTerminal",
+    "onCommand:multitasker.showTerminalStatusLogs",
+    "onUri"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "multitasker.startSession",
+        "title": "Multitasker: Start Session Terminal"
+      },
+      {
+        "command": "multitasker.attachTerminal",
+        "title": "Multitasker: Connect Existing Terminal"
+      },
+      {
+        "command": "multitasker.disconnectTerminal",
+        "title": "Multitasker: Disconnect Terminal"
+      },
+      {
+        "command": "multitasker.showTerminalStatusLogs",
+        "title": "Multitasker: Show Terminal Status Logs"
+      }
+    ],
+    "configuration": {
+      "title": "Multitasker",
+      "properties": {
+        "multitasker.debugTerminalStatus": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write terminal status diagnostics to the Multitasker Terminal Status output channel and debug-log\\.multitasker-terminal-debug*.log files. File logs include terminal output only for shell executions VS Code exposes after Multitasker connects."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "dev": "npm run compile && code --extensionDevelopmentPath=.",
+    "watch": "tsc -watch -p .",
+    "vscode:prepublish": "npm run compile",
+    "package": "npm run compile && npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "1.96.0",
+    "typescript": "^5.9.3"
+  }
+}

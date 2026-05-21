@@ -1,11 +1,10 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';" />
     <title>Multitasker</title>
-    <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css" />
     <style>
       :root {
         --bg:       #0d1117;
@@ -19,6 +18,8 @@
         --red:      #f85149;
         --gray:     #484f58;
         --accent:   #58a6ff;
+        --slack:    #a371f7;
+        --slack-strong: #d2a8ff;
         --sidebar-w: 280px;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -72,9 +73,92 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        position: relative;
       }
       #sidebar-header span { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+      .sidebar-header-actions { display: flex; align-items: center; gap: 6px; }
+      #btn-sidebar-add {
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        font-size: 16px;
+        line-height: 18px;
+      }
+      .context-menu {
+        position: absolute;
+        top: 34px;
+        right: 10px;
+        min-width: 150px;
+        padding: 4px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg2);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+        z-index: 20;
+      }
+      .context-menu-item {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+        border-radius: 6px;
+        padding: 7px 9px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .context-menu-item:hover { background: var(--bg3); }
+      .context-menu-item:disabled { opacity: 0.45; cursor: default; }
+      .context-menu-item:disabled:hover { background: transparent; }
+      #next-up-menu {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: auto;
+        z-index: 100;
+      }
+      #session-count { color: var(--green); font-weight: 700; font-size: 12px; }
       #session-list { flex: 1; overflow-y: auto; padding: 6px; }
+      .next-up-card { cursor: grab; }
+      .next-up-card:active { cursor: grabbing; }
+      .next-up-card.dragging { opacity: 0.45; }
+      .next-up-card.drag-over {
+        border-color: var(--accent);
+        background: rgba(88,166,255,0.08);
+      }
+      .slack-card {
+        border: 1px solid rgba(163,113,247,0.58);
+        border-radius: 8px;
+        padding: 8px;
+        margin-bottom: 6px;
+        background: linear-gradient(135deg, rgba(163,113,247,0.16), rgba(224,30,90,0.08));
+        box-shadow: inset 3px 0 0 var(--slack);
+      }
+      .slack-card:hover {
+        border-color: var(--slack);
+        background: linear-gradient(135deg, rgba(163,113,247,0.22), rgba(224,30,90,0.12));
+      }
+      .slack-card-top { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+      .slack-channel { color: var(--slack-strong); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .slack-time { color: var(--text-dim); font-size: 11px; margin-left: auto; white-space: nowrap; }
+      .slack-user { color: var(--text-dim); font-size: 11px; margin-bottom: 4px; }
+      .slack-text { font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .manual-task-card {
+        border: 1px solid rgba(210,153,34,0.5);
+        border-radius: 8px;
+        padding: 8px;
+        margin-bottom: 6px;
+        background: rgba(210,153,34,0.1);
+        box-shadow: inset 3px 0 0 var(--yellow);
+      }
+      .manual-task-card:hover {
+        border-color: var(--yellow);
+        background: rgba(210,153,34,0.16);
+      }
+      .manual-task-top { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+      .manual-task-label { color: var(--yellow); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+      .manual-task-time { color: var(--text-dim); font-size: 11px; margin-left: auto; white-space: nowrap; }
+      .manual-task-text { font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
       .session-card {
         border-radius: 8px;
         padding: 10px 10px 8px;
@@ -87,14 +171,15 @@
       .session-card.active { background: var(--bg3); border-color: var(--accent); }
       .session-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
       .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-      .status-dot.waiting { background: var(--green); box-shadow: 0 0 6px var(--green); }
-      .status-dot.running { background: var(--yellow); animation: pulse 1.5s infinite; }
+      .status-dot.waiting,
+      .status-dot.starting,
+      .status-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
+      .status-dot.needs_attention { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
       .status-dot.error   { background: var(--red); }
-      .status-dot.stopped { background: var(--gray); }
-      @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+      .status-dot.stopped,
+      .status-dot.detached { background: var(--gray); }
       .session-name { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .session-cwd { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 6px; }
-      .session-actions { display: flex; gap: 4px; }
       .btn-xs {
         background: transparent;
         border: 1px solid var(--border);
@@ -105,34 +190,78 @@
         font-size: 11px;
       }
       .btn-xs:hover { background: var(--bg); color: var(--text); }
+      .btn-xs.vscode { border-color: var(--accent); color: var(--accent); }
+      .btn-xs.vscode:hover { background: rgba(88,166,255,0.1); }
       .btn-xs.review { border-color: var(--green); color: var(--green); }
       .btn-xs.review:hover { background: rgba(63,185,80,0.1); }
-      .btn-xs.kill { border-color: var(--red); color: var(--red); }
-      .btn-xs.kill:hover { background: rgba(248,81,73,0.1); }
-      .waiting-badge {
-        font-size: 10px; background: var(--green); color: #000;
+      .btn-xs.rename { border-color: var(--accent); color: var(--accent); }
+      .btn-xs.rename:hover { background: rgba(88,166,255,0.1); }
+      .btn-xs.remove { border-color: var(--red); color: var(--red); }
+      .btn-xs.remove:hover { background: rgba(248,81,73,0.1); }
+      .status-badge {
+        font-size: 10px; color: #000;
         border-radius: 3px; padding: 1px 4px; font-weight: 700;
+      }
+      .status-badge.waiting,
+      .status-badge.starting,
+      .status-badge.running { background: var(--green); }
+      .status-badge.needs_attention { background: var(--yellow); }
+      .status-badge.error { background: var(--red); color: #fff; }
+      .status-badge.stopped,
+      .status-badge.detached { background: var(--gray); color: var(--text); }
+      .shell-badge {
+        font-size: 10px; border-radius: 3px; padding: 1px 5px; font-weight: 600;
+        background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
+        text-transform: uppercase; letter-spacing: 0.3px;
       }
       #empty-state { padding: 24px 16px; text-align: center; color: var(--text-dim); font-size: 12px; line-height: 1.6; }
       #empty-state .empty-icon { font-size: 28px; margin-bottom: 8px; }
-      #terminal-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-      #terminal-header {
+      #session-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+      #detail-header {
         padding: 8px 14px;
         background: var(--bg2);
         border-bottom: 1px solid var(--border);
         display: flex; align-items: center; gap: 8px;
         flex-shrink: 0; min-height: 40px;
       }
-      #terminal-title { font-size: 13px; font-weight: 600; flex: 1; }
-      #terminal-cwd { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; }
-      #terminal-wrap { flex: 1; padding: 4px; overflow: hidden; position: relative; background: #0d1117; }
-      .xterm-container { position: absolute; inset: 4px; }
+      #detail-title { font-size: 13px; font-weight: 600; flex: 1; }
+      #detail-cwd { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+      #detail-body { flex: 1; position: relative; background: var(--bg); overflow: auto; }
       #no-session-msg {
         position: absolute; inset: 0;
         display: flex; flex-direction: column; align-items: center; justify-content: center;
-        color: var(--text-dim); gap: 10px;
+        color: var(--text-dim); gap: 10px; text-align: center;
       }
       #no-session-msg .big-icon { font-size: 48px; }
+      #session-summary {
+        max-width: 720px;
+        margin: 54px auto;
+        padding: 24px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--bg2);
+      }
+      #session-summary.hidden { display: none; }
+      #session-summary h2 { font-size: 18px; margin-bottom: 8px; }
+      #session-summary p { color: var(--text-dim); line-height: 1.5; margin-bottom: 18px; }
+      .summary-grid { display: grid; grid-template-columns: 140px 1fr; gap: 10px; margin-bottom: 18px; }
+      .summary-label { color: var(--text-dim); font-size: 12px; }
+      .summary-value { overflow-wrap: anywhere; }
+      .detail-notice {
+        border: 1px solid var(--yellow);
+        border-radius: 8px;
+        color: var(--yellow);
+        background: rgba(210,153,34,0.1);
+        padding: 10px 12px;
+        margin-bottom: 16px;
+        line-height: 1.4;
+      }
+      .detail-notice.info {
+        border-color: var(--accent);
+        color: var(--accent);
+        background: rgba(88,166,255,0.1);
+      }
+      .summary-actions { display: flex; gap: 8px; flex-wrap: wrap; }
       .modal-overlay {
         position: fixed; inset: 0;
         background: rgba(0,0,0,0.6);
@@ -140,6 +269,7 @@
         z-index: 100; backdrop-filter: blur(2px);
       }
       .modal-overlay.hidden { display: none; }
+      .hidden { display: none !important; }
       .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 440px; max-width: 95vw; }
       .modal h2 { font-size: 16px; margin-bottom: 18px; }
       .form-group { margin-bottom: 14px; }
@@ -149,6 +279,11 @@
         border-radius: 6px; padding: 7px 10px; color: var(--text); font-size: 13px; outline: none;
       }
       .form-group input:focus { border-color: var(--accent); }
+      .form-group textarea {
+        width: 100%; min-height: 90px; resize: vertical; background: var(--bg3); border: 1px solid var(--border);
+        border-radius: 6px; padding: 7px 10px; color: var(--text); font: inherit; outline: none;
+      }
+      .form-group textarea:focus { border-color: var(--accent); }
       .shell-selector { display: flex; gap: 4px; }
       .shell-btn {
         background: var(--bg3);
@@ -162,14 +297,44 @@
       }
       .shell-btn:hover { background: #30363d; color: var(--text); }
       .shell-btn.active { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600; }
-      .shell-badge {
-        font-size: 10px; border-radius: 3px; padding: 1px 5px; font-weight: 600;
-        background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
-        text-transform: uppercase; letter-spacing: 0.3px;
-      }
-      .shell-badge.ssh { border-color: var(--accent); color: var(--accent); }
       .form-row { display: flex; gap: 6px; }
       .form-row input { flex: 1; }
+      .weekday-selector { display: flex; gap: 4px; flex-wrap: wrap; }
+      .weekday-btn {
+        background: var(--bg3);
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        border-radius: 999px;
+        padding: 4px 9px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .weekday-btn.active {
+        background: rgba(88,166,255,0.16);
+        border-color: var(--accent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .recurring-task-list {
+        max-height: 170px;
+        overflow-y: auto;
+        border-top: 1px solid var(--border);
+        margin-top: 12px;
+        padding-top: 10px;
+      }
+      .recurring-task-item {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        justify-content: space-between;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        margin-bottom: 6px;
+        background: rgba(210,153,34,0.08);
+      }
+      .recurring-task-text { font-size: 12px; overflow-wrap: anywhere; }
+      .recurring-task-schedule { color: var(--text-dim); font-size: 11px; margin-top: 3px; }
       .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
       ::-webkit-scrollbar { width: 6px; }
       ::-webkit-scrollbar-track { background: transparent; }
@@ -186,34 +351,73 @@
     <div id="layout">
       <div id="sidebar">
         <div id="sidebar-header">
-          <span>Sessions</span>
-          <span id="waiting-count" style="display:none; color:var(--green); font-weight:700; font-size:12px;"></span>
+          <span>Next up</span>
+          <div class="sidebar-header-actions">
+            <span id="session-count" style="display:none;"></span>
+            <button class="btn-xs" id="btn-clear-slack" title="Clear Slack notifications" style="display:none;">Clear</button>
+            <button class="btn-xs" id="btn-sidebar-add" title="Add item">+</button>
+          </div>
+          <div class="context-menu hidden" id="sidebar-add-menu">
+            <button class="context-menu-item" id="btn-add-manual-task">Manual task</button>
+            <button class="context-menu-item" id="btn-add-recurring-task">Recurring task</button>
+            <button class="context-menu-item" id="btn-add-slack">Slack</button>
+          </div>
         </div>
         <div id="session-list">
           <div id="empty-state">
             <div class="empty-icon">&#129302;</div>
-            <p>No sessions yet.<br>Click <strong>+ New Session</strong> to start<br>an AI CLI (claude, codex, etc.)</p>
+            <p>Nothing to do right now.<br>Sessions, manual tasks, and Slack notifications<br>will show up here.</p>
           </div>
+        </div>
+        <div class="context-menu hidden" id="next-up-menu">
+          <button class="context-menu-item" id="btn-next-up-done">Done</button>
+          <button class="context-menu-item" id="btn-next-up-move-up">Move up</button>
+          <button class="context-menu-item" id="btn-next-up-move-down">Move down</button>
         </div>
       </div>
 
-      <div id="terminal-area">
-        <div id="terminal-header">
-          <span id="terminal-title" style="color:var(--text-dim)">No session selected</span>
-          <span id="terminal-cwd"></span>
+      <div id="session-detail">
+        <div id="detail-header">
+          <span id="detail-title" style="color:var(--text-dim)">No session selected</span>
+          <span id="detail-cwd"></span>
+          <button class="btn-xs rename" id="btn-rename-active" style="display:none">&#9998; Rename</button>
+          <button class="btn-xs vscode" id="btn-vscode-active" style="display:none">&#128187; Open in VS Code</button>
           <button class="btn-xs review" id="btn-review-active" style="display:none">&#128194; Review Changes</button>
-          <button class="btn-xs kill"   id="btn-kill-active"   style="display:none">&#10005; Kill</button>
+          <button class="btn-xs remove" id="btn-remove-active" style="display:none">&#10005; Remove</button>
         </div>
-        <div id="terminal-wrap">
+        <div id="detail-body">
           <div id="no-session-msg">
             <span class="big-icon">&#128187;</span>
-            <p>Select or create a session to begin</p>
+            <p>Select or create a session to manage it.<br>The shell opens in VS Code.</p>
+          </div>
+          <div id="session-summary" class="hidden">
+            <h2 id="summary-name"></h2>
+            <p>Multitasker tracks this session while the interactive shell runs in VS Code through the companion extension.</p>
+            <div id="detail-notice" class="detail-notice hidden"></div>
+            <div class="summary-grid">
+              <div class="summary-label" id="summary-location-label">Working directory</div>
+              <div class="summary-value" id="summary-cwd"></div>
+              <div class="summary-label" id="summary-ssh-label">SSH command</div>
+              <div class="summary-value" id="summary-ssh"></div>
+              <div class="summary-label">Command</div>
+              <div class="summary-value" id="summary-command"></div>
+              <div class="summary-label">Shell</div>
+              <div class="summary-value" id="summary-shell"></div>
+              <div class="summary-label">Terminal</div>
+              <div class="summary-value" id="summary-terminal"></div>
+              <div class="summary-label" id="summary-capture-label">Output capture</div>
+              <div class="summary-value" id="summary-capture"></div>
+            </div>
+            <div class="summary-actions">
+              <button class="btn" id="btn-rename-summary">Rename</button>
+              <button class="btn btn-primary" id="btn-vscode-summary">Open in VS Code</button>
+              <button class="btn" id="btn-review-summary" style="display:none">Review Changes</button>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- New Session Modal -->
     <div class="modal-overlay hidden" id="new-session-modal">
       <div class="modal">
         <h2>New AI Session</h2>
@@ -222,23 +426,23 @@
           <input id="input-name" type="text" placeholder="e.g. Project Alpha" />
         </div>
         <div class="form-group">
-          <label>Shell</label>
+          <label>Session type</label>
           <div class="shell-selector" id="new-shell-selector">
             <button class="shell-btn" data-shell="powershell">PowerShell</button>
             <button class="shell-btn" data-shell="bash">Bash</button>
             <button class="shell-btn" data-shell="ssh">SSH</button>
           </div>
         </div>
-        <div class="form-group" id="ssh-host-group" style="display:none">
-          <label>SSH Host</label>
-          <input id="input-ssh-host" type="text" placeholder="user@hostname" />
+        <div class="form-group hidden" id="ssh-command-group">
+          <label>SSH command</label>
+          <input id="input-ssh-command" type="text" placeholder="ssh user@server" />
         </div>
         <div class="form-group">
-          <label>Command to run (AI CLI)</label>
+          <label id="input-cmd-label">Command to run (AI CLI)</label>
           <input id="input-cmd" type="text" placeholder="e.g. claude, codex" />
         </div>
-        <div class="form-group" id="cwd-group">
-          <label>Working directory</label>
+        <div class="form-group">
+          <label id="input-cwd-label">Working directory</label>
           <div class="form-row">
             <input id="input-cwd" type="text" placeholder="C:\Projects\my-app" />
             <button class="btn" id="btn-pick-dir">Browse</button>
@@ -251,7 +455,65 @@
       </div>
     </div>
 
-    <!-- Settings Modal -->
+    <div class="modal-overlay hidden" id="rename-session-modal">
+      <div class="modal">
+        <h2>Rename Session</h2>
+        <div class="form-group">
+          <label>Session name</label>
+          <input id="input-rename-session" type="text" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn" id="btn-cancel-rename">Cancel</button>
+          <button class="btn btn-primary" id="btn-confirm-rename">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="manual-task-modal">
+      <div class="modal">
+        <h2>Add Manual Task</h2>
+        <div class="form-group">
+          <label>Task text</label>
+          <textarea id="input-manual-task-text" placeholder="What needs to be done?"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" id="btn-cancel-manual-task">Cancel</button>
+          <button class="btn btn-primary" id="btn-confirm-manual-task">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="recurring-task-modal">
+      <div class="modal">
+        <h2>Add Recurring Task</h2>
+        <div class="form-group">
+          <label>Task text</label>
+          <textarea id="input-recurring-task-text" placeholder="e.g. Check PR"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Time</label>
+          <input id="input-recurring-task-time" type="time" value="08:00" />
+        </div>
+        <div class="form-group">
+          <label>Days</label>
+          <div class="weekday-selector" id="recurring-weekday-selector">
+            <button class="weekday-btn" data-day="1">Mon</button>
+            <button class="weekday-btn" data-day="2">Tue</button>
+            <button class="weekday-btn" data-day="3">Wed</button>
+            <button class="weekday-btn" data-day="4">Thu</button>
+            <button class="weekday-btn" data-day="5">Fri</button>
+            <button class="weekday-btn" data-day="6">Sat</button>
+            <button class="weekday-btn" data-day="0">Sun</button>
+          </div>
+        </div>
+        <div class="recurring-task-list" id="recurring-task-list"></div>
+        <div class="modal-footer">
+          <button class="btn" id="btn-cancel-recurring-task">Close</button>
+          <button class="btn btn-primary" id="btn-confirm-recurring-task">Add</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-overlay hidden" id="settings-modal">
       <div class="modal">
         <h2>&#9881; Settings</h2>
@@ -260,15 +522,11 @@
           <input id="settings-review-tool" type="text" placeholder="code {path}" />
         </div>
         <div class="form-group">
-          <label>Default shell</label>
+          <label>Default VS Code shell</label>
           <div class="shell-selector" id="settings-shell-selector">
             <button class="shell-btn" data-shell="powershell">PowerShell</button>
             <button class="shell-btn" data-shell="bash">Bash</button>
           </div>
-        </div>
-        <div class="form-group">
-          <label>Idle timeout (ms)  time after last output to mark as "waiting"</label>
-          <input id="settings-idle-timeout" type="number" min="200" max="5000" step="100" />
         </div>
         <div class="modal-footer">
           <button class="btn" id="btn-cancel-settings">Cancel</button>
@@ -277,16 +535,52 @@
       </div>
     </div>
 
-    <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
-    <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
     <script>
       const api = window.electronAPI;
-      const terminals = {};
+      const NEXT_UP_ORDER_STORAGE_KEY = 'multitasker.nextUpOrder.v1';
+      const NEXT_UP_DONE_STORAGE_KEY = 'multitasker.nextUpDone.v1';
       let sessions = [];
+      let manualTasks = [];
+      let recurringTasks = [];
+      let slackNotifications = [];
+      let slackListenerStatus = '';
+      let nextUpOrder = loadNextUpOrder();
+      let nextUpDone = new Set(loadNextUpDone());
+      let nextUpContextKey = '';
+      let draggedNextUpKey = '';
+      let suppressNextUpClick = false;
       let activeId = null;
       let newShellType = 'powershell';
+      let renameSessionId = null;
+      let pendingSessionList = null;
+      let renderFrameId = 0;
 
-      // Shell selector helper
+      function loadNextUpOrder() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(NEXT_UP_ORDER_STORAGE_KEY) || '[]');
+          return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string') : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function saveNextUpOrder() {
+        localStorage.setItem(NEXT_UP_ORDER_STORAGE_KEY, JSON.stringify(nextUpOrder));
+      }
+
+      function loadNextUpDone() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(NEXT_UP_DONE_STORAGE_KEY) || '[]');
+          return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string') : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function saveNextUpDone() {
+        localStorage.setItem(NEXT_UP_DONE_STORAGE_KEY, JSON.stringify([...nextUpDone]));
+      }
+
       function initShellSelector(containerId, onChange) {
         const container = document.getElementById(containerId);
         container.querySelectorAll('.shell-btn').forEach(btn => {
@@ -305,37 +599,202 @@
         });
       }
 
-      api.getSessions().then(list => renderSidebar(list));
+      api.getSessions().then(list => {
+        sessions = list;
+        scheduleListRender(list);
+      });
       api.onListUpdate(list => {
         sessions = list;
-        renderSidebar(list);
-        updateWaitingCount(list);
-        if (activeId) refreshHeader(activeId);
+        scheduleListRender(list);
       });
-      api.onOutput((id, data) => {
-        if (terminals[id]) terminals[id].term.write(data);
-      });
+      if (api.getManualTasks) {
+        api.getManualTasks().then(list => {
+          manualTasks = list;
+          renderNextUp();
+        });
+      }
+      if (api.onManualTaskListUpdate) {
+        api.onManualTaskListUpdate(list => {
+          manualTasks = list;
+          renderNextUp();
+        });
+      }
+      if (api.getRecurringTasks) {
+        api.getRecurringTasks().then(list => {
+          recurringTasks = list;
+          renderRecurringTaskList();
+        });
+      }
+      if (api.onRecurringTaskListUpdate) {
+        api.onRecurringTaskListUpdate(list => {
+          recurringTasks = list;
+          renderRecurringTaskList();
+        });
+      }
+      if (api.getSlackNotifications) {
+        api.getSlackNotifications().then(list => {
+          slackNotifications = list;
+          renderSlackNotifications();
+        });
+      }
+      if (api.getSlackListenerStatus) {
+        api.getSlackListenerStatus().then(status => {
+          if (status) applySlackListenerStatus(status.ok, status.message, false);
+        });
+      }
+      if (api.onSlackNotification) {
+        api.onSlackNotification(notification => {
+          slackNotifications = [notification, ...slackNotifications.filter(existing => existing.id !== notification.id)].slice(0, 100);
+          renderSlackNotifications();
+        });
+      }
+      if (api.onSlackListUpdate) {
+        api.onSlackListUpdate(list => {
+          slackNotifications = list;
+          renderSlackNotifications();
+        });
+      }
+      if (api.onSlackAuthStatus) {
+        api.onSlackAuthStatus(({ ok, message }) => {
+          if (!ok) alert(message);
+        });
+      }
+      if (api.onSlackListenerStatus) {
+        api.onSlackListenerStatus(({ ok, message }) => {
+          applySlackListenerStatus(ok, message, true);
+        });
+      }
+      if (api.onVsCodeFocusFailed) {
+        api.onVsCodeFocusFailed(({ id, message }) => {
+          if (id === activeId) setDetailNotice(message);
+        });
+      }
+
+      function upsertSession(session) {
+        sessions = [session, ...sessions.filter(existing => existing.id !== session.id)];
+      }
+
+      function scheduleListRender(list) {
+        pendingSessionList = list;
+        if (renderFrameId) return;
+        renderFrameId = requestAnimationFrame(() => {
+          renderFrameId = 0;
+          const nextList = pendingSessionList;
+          pendingSessionList = null;
+          if (!nextList) return;
+          renderSidebar(nextList);
+          if (activeId && nextList.some(s => s.id === activeId)) refreshDetail(activeId);
+          else if (activeId) clearDetail();
+        });
+      }
 
       function renderSidebar(list) {
         const container = document.getElementById('session-list');
         const empty = document.getElementById('empty-state');
-        if (list.length === 0) {
+        const items = nextUpItems(list);
+        container.querySelectorAll('.session-card, .manual-task-card, .slack-card').forEach(el => el.remove());
+        updateSessionCount(items.length);
+
+        if (items.length === 0) {
           empty.style.display = '';
-          container.querySelectorAll('.session-card').forEach(el => el.remove());
+          clearDetail();
           return;
         }
+
         empty.style.display = 'none';
-        const existing = {};
-        container.querySelectorAll('.session-card').forEach(el => { existing[el.dataset.id] = el; });
-        Object.keys(existing).forEach(id => { if (!list.find(s => s.id === id)) existing[id].remove(); });
-        list.forEach((s, i) => {
-          let card = existing[s.id];
-          if (!card) { card = createCard(s); container.appendChild(card); }
-          else updateCard(card, s);
-          const nodes = container.querySelectorAll('.session-card');
-          if (nodes[i] !== card) container.insertBefore(card, nodes[i] || null);
-          card.classList.toggle('active', s.id === activeId);
+        items.forEach(item => {
+          const card = item.kind === 'session'
+            ? createCard(item.session)
+            : item.kind === 'manual'
+              ? createManualTaskCard(item.task)
+              : createSlackCard(item.notification);
+          prepareNextUpCard(card, nextUpItemKey(item));
+          if (item.kind === 'session') card.classList.toggle('active', item.session.id === activeId);
+          container.appendChild(card);
         });
+      }
+
+      function nextUpItems(list) {
+        syncNextUpDone(list.map(sessionDoneKey));
+        const items = [
+          ...list.map(session => ({ kind: 'session', session, priority: sessionPriority(session), time: session.lastActivity || 0 })),
+          ...manualTasks.map(task => ({ kind: 'manual', task, priority: 2.5, time: task.createdAt || 0 })),
+          ...slackNotifications.map(notification => ({ kind: 'slack', notification, priority: slackNotificationPriority(notification), time: notification.receivedAt || 0 })),
+        ].filter(item => !isNextUpDone(item));
+        const defaultOrderedItems = items.sort((a, b) => {
+          if (a.priority !== b.priority) return a.priority - b.priority;
+          return b.time - a.time;
+        });
+        syncNextUpOrder(defaultOrderedItems.map(nextUpItemKey));
+        const orderIndex = new Map(nextUpOrder.map((key, index) => [key, index]));
+        return defaultOrderedItems.sort((a, b) => {
+          const bottomGroupDiff = nextUpBottomGroup(a) - nextUpBottomGroup(b);
+          if (bottomGroupDiff !== 0) return bottomGroupDiff;
+          return (orderIndex.get(nextUpItemKey(a)) ?? Number.MAX_SAFE_INTEGER) -
+            (orderIndex.get(nextUpItemKey(b)) ?? Number.MAX_SAFE_INTEGER);
+        });
+      }
+
+      function nextUpBottomGroup(item) {
+        return item.kind === 'session' && normalizeStatus(item.session.status) === 'running' ? 1 : 0;
+      }
+
+      function nextUpItemKey(item) {
+        if (item.kind === 'session') return 'session:' + item.session.id;
+        if (item.kind === 'manual') return 'manual:' + item.task.id;
+        return 'slack:' + item.notification.id;
+      }
+
+      function sessionDoneKey(session) {
+        return 'session:' + session.id + ':' + normalizeStatus(session.status) + ':' + (session.lastActivity || 0);
+      }
+
+      function isNextUpDone(item) {
+        return item.kind === 'session' && nextUpDone.has(sessionDoneKey(item.session));
+      }
+
+      function syncNextUpOrder(availableKeys) {
+        const available = new Set(availableKeys);
+        const defaultIndex = new Map(availableKeys.map((key, index) => [key, index]));
+        const nextOrder = nextUpOrder.filter(key => available.has(key));
+        const present = new Set(nextOrder);
+        availableKeys.forEach(key => {
+          if (present.has(key)) return;
+          const keyIndex = defaultIndex.get(key) ?? Number.MAX_SAFE_INTEGER;
+          const insertAt = nextOrder.findIndex(existingKey => (defaultIndex.get(existingKey) ?? Number.MAX_SAFE_INTEGER) > keyIndex);
+          if (insertAt < 0) nextOrder.push(key);
+          else nextOrder.splice(insertAt, 0, key);
+          present.add(key);
+        });
+        if (nextOrder.length === nextUpOrder.length && nextOrder.every((key, index) => key === nextUpOrder[index])) return;
+        nextUpOrder = nextOrder;
+        saveNextUpOrder();
+      }
+
+      function syncNextUpDone(availableDoneKeys) {
+        const available = new Set(availableDoneKeys);
+        const kept = [...nextUpDone].filter(key => available.has(key));
+        if (kept.length === nextUpDone.size) return;
+        nextUpDone = new Set(kept);
+        saveNextUpDone();
+      }
+
+      function sessionPriority(session) {
+        const status = normalizeStatus(session.status);
+        if (status === 'needs_attention') return 0;
+        if (status === 'error') return 1;
+        if (status === 'waiting' || status === 'starting') return 3;
+        if (status === 'stopped' || status === 'detached') return 4;
+        return 5;
+      }
+
+      function slackNotificationPriority(notification) {
+        return 2 + (slackPriorityRank(notification) / 10);
+      }
+
+      function slackPriorityRank(notification) {
+        const rank = notification && Number.isFinite(notification.priorityRank) ? Math.floor(notification.priorityRank) : 4;
+        return Math.max(0, Math.min(4, rank));
       }
 
       function createCard(s) {
@@ -343,131 +802,672 @@
         card.className = 'session-card';
         card.dataset.id = s.id;
         card.innerHTML = cardHTML(s);
-        card.addEventListener('click', () => activateSession(s.id));
-        attachCardButtons(card, s);
-        ensureTerminal(s.id);
+        card.addEventListener('click', () => {
+          if (suppressNextUpClick) {
+            suppressNextUpClick = false;
+            return;
+          }
+          const currentSession = sessions.find(x => x.id === card.dataset.id);
+          if (!currentSession) return;
+          activateSession(currentSession.id);
+          openSessionInVsCode(currentSession);
+        });
         return card;
       }
 
-      function updateCard(card, s) {
-        card.innerHTML = cardHTML(s);
-        attachCardButtons(card, s);
+      function createSlackCard(notification) {
+        const card = document.createElement('div');
+        card.className = 'slack-card';
+        card.dataset.notificationId = notification.id;
+        card.innerHTML = slackNotificationHTML(notification);
+        card.title = 'Open in Slack';
+        card.addEventListener('click', () => {
+          if (suppressNextUpClick) {
+            suppressNextUpClick = false;
+            return;
+          }
+          openSlackNotification(notification.id);
+        });
+        return card;
       }
 
-      function attachCardButtons(card, s) {
-        const rev = card.querySelector('.btn-xs.review');
-        if (rev) rev.addEventListener('click', e => { e.stopPropagation(); api.openReview(s.cwd); });
-        card.querySelector('.btn-xs.kill').addEventListener('click', e => {
-          e.stopPropagation();
-          api.killSession(s.id).then(() => cleanupTerminal(s.id));
-        });
+      function createManualTaskCard(task) {
+        const card = document.createElement('div');
+        card.className = 'manual-task-card';
+        card.dataset.taskId = task.id;
+        card.innerHTML = manualTaskHTML(task);
+        card.title = 'Right-click for task options';
+        return card;
+      }
+
+      async function openSlackNotification(id) {
+        if (!api.openSlackNotification) return;
+        const opened = await api.openSlackNotification(id);
+        if (!opened) alert('Could not open this Slack notification.');
+      }
+
+      function prepareNextUpCard(card, key) {
+        card.classList.add('next-up-card');
+        card.dataset.nextUpKey = key;
+        card.draggable = true;
+        card.addEventListener('dragstart', handleNextUpDragStart);
+        card.addEventListener('dragover', handleNextUpDragOver);
+        card.addEventListener('dragleave', handleNextUpDragLeave);
+        card.addEventListener('drop', handleNextUpDrop);
+        card.addEventListener('dragend', handleNextUpDragEnd);
+        card.addEventListener('contextmenu', event => openNextUpMenu(event, key));
+      }
+
+      function handleNextUpDragStart(event) {
+        draggedNextUpKey = event.currentTarget.dataset.nextUpKey || '';
+        if (!draggedNextUpKey) {
+          event.preventDefault();
+          return;
+        }
+        closeNextUpMenu();
+        event.currentTarget.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', draggedNextUpKey);
+      }
+
+      function handleNextUpDragOver(event) {
+        const targetKey = event.currentTarget.dataset.nextUpKey || '';
+        if (!draggedNextUpKey || targetKey === draggedNextUpKey) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        event.currentTarget.classList.add('drag-over');
+      }
+
+      function handleNextUpDragLeave(event) {
+        event.currentTarget.classList.remove('drag-over');
+      }
+
+      function handleNextUpDrop(event) {
+        const targetKey = event.currentTarget.dataset.nextUpKey || '';
+        if (!draggedNextUpKey || !targetKey || targetKey === draggedNextUpKey) return;
+        event.preventDefault();
+        event.currentTarget.classList.remove('drag-over');
+        const targetBounds = event.currentTarget.getBoundingClientRect();
+        const insertAfter = event.clientY > targetBounds.top + (targetBounds.height / 2);
+        moveNextUpItemTo(draggedNextUpKey, targetKey, insertAfter);
+        suppressNextUpClick = true;
+      }
+
+      function handleNextUpDragEnd(event) {
+        event.currentTarget.classList.remove('dragging');
+        document.querySelectorAll('.next-up-card.drag-over').forEach(card => card.classList.remove('drag-over'));
+        draggedNextUpKey = '';
+        setTimeout(() => { suppressNextUpClick = false; }, 150);
+      }
+
+      function openNextUpMenu(event, key) {
+        event.preventDefault();
+        closeSidebarAddMenu();
+        nextUpContextKey = key;
+        const keys = nextUpCurrentKeys();
+        const index = keys.indexOf(key);
+        document.getElementById('btn-next-up-move-up').disabled = index <= 0;
+        document.getElementById('btn-next-up-move-down').disabled = index === -1 || index >= keys.length - 1;
+
+        const menu = document.getElementById('next-up-menu');
+        menu.style.left = Math.min(event.clientX, window.innerWidth - 160) + 'px';
+        menu.style.top = Math.min(event.clientY, window.innerHeight - 80) + 'px';
+        menu.classList.remove('hidden');
+      }
+
+      function closeNextUpMenu() {
+        nextUpContextKey = '';
+        document.getElementById('next-up-menu').classList.add('hidden');
+      }
+
+      function moveNextUpContext(delta) {
+        if (!nextUpContextKey) return;
+        moveNextUpItemByDelta(nextUpContextKey, delta);
+        closeNextUpMenu();
+      }
+
+      async function markNextUpContextDone() {
+        const key = nextUpContextKey;
+        closeNextUpMenu();
+        if (!key) return;
+
+        if (key.startsWith('slack:')) {
+          const notificationId = key.slice('slack:'.length);
+          slackNotifications = slackNotifications.filter(notification => notification.id !== notificationId);
+          renderSlackNotifications();
+          if (api.removeSlackNotification) await api.removeSlackNotification(notificationId);
+          return;
+        }
+
+        if (key.startsWith('manual:')) {
+          const taskId = key.slice('manual:'.length);
+          manualTasks = manualTasks.filter(task => task.id !== taskId);
+          renderNextUp();
+          if (api.removeManualTask) await api.removeManualTask(taskId);
+          return;
+        }
+
+        if (key.startsWith('session:')) {
+          const sessionId = key.slice('session:'.length);
+          const session = sessions.find(candidate => candidate.id === sessionId);
+          if (!session) return;
+          nextUpDone.add(sessionDoneKey(session));
+          saveNextUpDone();
+          renderSidebar(sessions);
+        }
+      }
+
+      function moveNextUpItemByDelta(key, delta) {
+        const keys = nextUpCurrentKeys();
+        const index = keys.indexOf(key);
+        const nextIndex = index + delta;
+        if (index < 0 || nextIndex < 0 || nextIndex >= keys.length) return;
+        [keys[index], keys[nextIndex]] = [keys[nextIndex], keys[index]];
+        setNextUpOrder(keys);
+      }
+
+      function moveNextUpItemTo(sourceKey, targetKey, insertAfter) {
+        const keys = nextUpCurrentKeys();
+        const sourceIndex = keys.indexOf(sourceKey);
+        if (sourceIndex < 0 || !keys.includes(targetKey)) return;
+        keys.splice(sourceIndex, 1);
+        const targetIndex = keys.indexOf(targetKey);
+        keys.splice(targetIndex + (insertAfter ? 1 : 0), 0, sourceKey);
+        setNextUpOrder(keys);
+      }
+
+      function nextUpCurrentKeys() {
+        return nextUpItems(sessions).map(nextUpItemKey);
+      }
+
+      function setNextUpOrder(keys) {
+        nextUpOrder = keys;
+        saveNextUpOrder();
+        renderSidebar(sessions);
       }
 
       function cardHTML(s) {
-        const shortCwd = s.cwd.length > 32 ? '...' + s.cwd.slice(-30) : s.cwd;
-        const waitBadge = s.status === 'waiting' ? '<span class="waiting-badge">WAITING</span>' : '';
-        const reviewBtn = s.gitChanges ? '<button class="btn-xs review">&#128194; Changes</button>' : '';
-        const shellLabel = s.shellType === 'ssh' ? s.sshHost || 'ssh' : s.shellType;
-        const shellBadge = '<span class="shell-badge' + (s.shellType === 'ssh' ? ' ssh' : '') + '">' + esc(shellLabel) + '</span>';
-        const cwdLine = s.shellType === 'ssh' ? '' : '<div class="session-cwd" title="' + esc(s.cwd) + '">' + esc(shortCwd) + '</div>';
-        return '<div class="session-card-top"><span class="status-dot ' + s.status + '"></span><span class="session-name">' + esc(s.name) + '</span>' + waitBadge + shellBadge + '</div>' + cwdLine + '<div class="session-actions">' + reviewBtn + '<button class="btn-xs kill">&#10005; Kill</button></div>';
+        const location = sessionLocationText(s);
+        const shortCwd = location.length > 32 ? '...' + location.slice(-30) : location;
+        const status = normalizeStatus(s.status);
+        const statusBadge = '<span class="status-badge ' + status + '">' + esc(statusLabel(status)) + '</span>';
+        const shellBadge = '<span class="shell-badge">' + esc(s.shellType) + '</span>';
+        return '<div class="session-card-top"><span class="status-dot ' + status + '"></span><span class="session-name">' + esc(s.name) + '</span>' + statusBadge + shellBadge + '</div><div class="session-cwd" title="' + esc(location) + '">' + esc(shortCwd) + '</div>';
       }
 
-      function updateWaitingCount(list) {
-        const n = list.filter(s => s.status === 'waiting').length;
-        const el = document.getElementById('waiting-count');
-        if (n > 0) { el.textContent = n + ' waiting'; el.style.display = ''; }
-        else el.style.display = 'none';
+      function manualTaskHTML(task) {
+        return '<div class="manual-task-top"><span class="manual-task-label">Manual task</span><span class="manual-task-time">' + esc(formatSlackTime(task.createdAt)) + '</span></div>' +
+          '<div class="manual-task-text">' + esc(task.text) + '</div>';
       }
 
-      function ensureTerminal(id) {
-        if (terminals[id]) return;
-        const wrap = document.getElementById('terminal-wrap');
-        const el = document.createElement('div');
-        el.className = 'xterm-container';
-        el.style.display = 'none';
-        wrap.appendChild(el);
-        const term = new Terminal({
-          theme: {
-            background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff',
-            black: '#484f58', red: '#f85149', green: '#3fb950', yellow: '#d29922',
-            blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39c5cf', white: '#b1bac4',
-            brightBlack: '#6e7681', brightRed: '#ff7b72', brightGreen: '#56d364',
-            brightYellow: '#e3b341', brightBlue: '#79c0ff', brightMagenta: '#d2a8ff',
-            brightCyan: '#56d4dd', brightWhite: '#f0f6fc',
-          },
-          fontFamily: '"Cascadia Code", "Fira Code", Consolas, monospace',
-          fontSize: 13, lineHeight: 1.3, cursorBlink: true,
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-        term.open(el);
-        fitAddon.fit();
-        term.onData(data => api.sendInput(id, data));
-        term.onResize(({ cols, rows }) => api.resizeSession(id, cols, rows));
-        terminals[id] = { term, fitAddon, el };
+      function updateSessionCount(countValue) {
+        const el = document.getElementById('session-count');
+        if (countValue > 0) {
+          el.textContent = String(countValue);
+          el.style.display = '';
+        } else {
+          el.style.display = 'none';
+        }
+        document.getElementById('btn-clear-slack').style.display = slackNotifications.length > 0 ? '' : 'none';
+      }
+
+      function renderNextUp() {
+        renderSidebar(sessions);
+      }
+
+      function renderSlackNotifications() {
+        renderNextUp();
+      }
+
+      function applySlackListenerStatus(ok, message, notifyOnError) {
+        slackListenerStatus = message || '';
+        if (!ok && notifyOnError) alert(message);
+      }
+
+      function slackNotificationHTML(notification) {
+        const channel = displaySlackChannelName(notification);
+        const channelType = notification.channelType || ((notification.channelId || '').startsWith('D') ? 'im' : '');
+        const channelLabel = channelType === 'im'
+          ? 'DM · ' + channel
+          : channelType === 'mpim'
+            ? 'Group DM · ' + channel
+            : '#' + channel;
+        const user = displaySlackUserName(notification);
+        const showUser = user && !(channelType === 'im' && user === channel);
+        return '<div class="slack-card-top"><span class="slack-channel">' + esc(channelLabel) + '</span><span class="slack-time">' + esc(formatSlackTime(notification.receivedAt)) + '</span></div>' +
+          (showUser ? '<div class="slack-user">' + esc(user) + '</div>' : '') +
+          '<div class="slack-text">' + esc(notification.text) + '</div>';
+      }
+
+      function displaySlackChannelName(notification) {
+        const value = notification.channelName || notification.channelId || 'Slack';
+        if (!isRawSlackChannelId(value)) return value;
+        return (notification.channelType || '').startsWith('im') || value.startsWith('D') ? 'Direct message' : 'Slack channel';
+      }
+
+      function displaySlackUserName(notification) {
+        const value = notification.userName || notification.userId || '';
+        return isRawSlackUserId(value) ? '' : value;
+      }
+
+      function isRawSlackChannelId(value) {
+        return /^[CDG][A-Z0-9]{8,}$/.test(value);
+      }
+
+      function isRawSlackUserId(value) {
+        return /^[UW][A-Z0-9]{8,}$/.test(value);
+      }
+
+      function formatSlackTime(value) {
+        const date = new Date(value);
+        if (!Number.isFinite(date.getTime())) return '';
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       }
 
       function activateSession(id) {
-        if (activeId === id) return;
-        if (activeId && terminals[activeId]) terminals[activeId].el.style.display = 'none';
         activeId = id;
-        const t = terminals[id];
-        if (t) {
-          t.el.style.display = '';
-          requestAnimationFrame(() => { t.fitAddon.fit(); t.term.focus(); });
-        }
-        document.getElementById('no-session-msg').style.display = 'none';
         document.querySelectorAll('.session-card').forEach(el => el.classList.toggle('active', el.dataset.id === id));
-        refreshHeader(id);
+        refreshDetail(id);
       }
 
-      function refreshHeader(id) {
+      function refreshDetail(id) {
         const s = sessions.find(x => x.id === id);
-        if (!s) return;
-        const title = document.getElementById('terminal-title');
-        title.textContent = s.name; title.style.color = '';
-        document.getElementById('terminal-cwd').textContent = s.cwd;
-        document.getElementById('btn-review-active').style.display = s.gitChanges ? '' : 'none';
-        document.getElementById('btn-kill-active').style.display = '';
+        if (!s) {
+          clearDetail();
+          return;
+        }
+        const ssh = isSshSession(s);
+        const sshLabel = document.getElementById('summary-ssh-label');
+        const sshValue = document.getElementById('summary-ssh');
+        const title = document.getElementById('detail-title');
+        title.textContent = s.name;
+        title.style.color = '';
+        document.getElementById('detail-cwd').textContent = sessionLocationText(s);
+        const detached = isDetachedSession(s);
+        const terminalClosed = normalizeStatus(s.status) === 'stopped' || normalizeStatus(s.status) === 'error';
+        document.getElementById('btn-rename-active').style.display = '';
+        document.getElementById('btn-vscode-active').style.display = terminalClosed ? 'none' : '';
+        document.getElementById('btn-review-active').style.display = s.gitChanges && !detached ? '' : 'none';
+        document.getElementById('btn-remove-active').style.display = '';
+        document.getElementById('no-session-msg').style.display = 'none';
+        document.getElementById('session-summary').classList.remove('hidden');
+        document.getElementById('summary-name').textContent = s.name;
+        document.getElementById('summary-location-label').textContent = ssh ? 'Remote path' : 'Working directory';
+        document.getElementById('summary-cwd').textContent = ssh ? (s.cwd || '(none)') : s.cwd;
+        sshLabel.style.display = ssh ? '' : 'none';
+        sshValue.style.display = ssh ? '' : 'none';
+        sshValue.textContent = ssh ? (s.sshCommand || '') : '';
+        const captureLabel = document.getElementById('summary-capture-label');
+        const captureValue = document.getElementById('summary-capture');
+        const captureText = terminalCaptureText(s);
+        captureLabel.style.display = captureText ? '' : 'none';
+        captureValue.style.display = captureText ? '' : 'none';
+        captureValue.textContent = captureText;
+        document.getElementById('summary-command').textContent = s.cmd || (ssh ? '(manual)' : '(none)');
+        document.getElementById('summary-shell').textContent = s.shellType;
+        document.getElementById('summary-terminal').textContent = terminalStatusText(s);
+        document.getElementById('btn-vscode-summary').style.display = terminalClosed ? 'none' : '';
+        document.getElementById('btn-review-summary').style.display = s.gitChanges && !ssh && !detached ? '' : 'none';
+        setDetailNotice(detached
+          ? 'This session is detached from VS Code. Open in VS Code will try to reconnect it from the terminal inventory.'
+          : ''
+        );
       }
 
-      function cleanupTerminal(id) {
-        const t = terminals[id];
-        if (t) { t.term.dispose(); t.el.remove(); delete terminals[id]; }
-        if (activeId === id) {
-          activeId = null;
-          const title = document.getElementById('terminal-title');
-          title.textContent = 'No session selected'; title.style.color = 'var(--text-dim)';
-          document.getElementById('terminal-cwd').textContent = '';
-          document.getElementById('btn-review-active').style.display = 'none';
-          document.getElementById('btn-kill-active').style.display = 'none';
-          document.getElementById('no-session-msg').style.display = '';
+      function clearDetail() {
+        activeId = null;
+        const title = document.getElementById('detail-title');
+        title.textContent = 'No session selected';
+        title.style.color = 'var(--text-dim)';
+        document.getElementById('detail-cwd').textContent = '';
+        document.getElementById('btn-rename-active').style.display = 'none';
+        document.getElementById('btn-vscode-active').style.display = 'none';
+        document.getElementById('btn-review-active').style.display = 'none';
+        document.getElementById('btn-remove-active').style.display = 'none';
+        document.getElementById('summary-capture-label').style.display = 'none';
+        document.getElementById('summary-capture').style.display = 'none';
+        document.getElementById('no-session-msg').style.display = '';
+        document.getElementById('session-summary').classList.add('hidden');
+        setDetailNotice('');
+        document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+      }
+
+      async function openSessionInVsCode(s) {
+        setDetailNotice('');
+        const opened = await api.openVsCode({
+          id: s.id,
+          name: s.name,
+          cmd: s.cmd,
+          cwd: s.cwd,
+          shellType: s.shellType,
+          sshCommand: s.sshCommand || '',
+          vscodeWindowId: s.vscodeWindowId || '',
+          terminalRef: s.terminalRef || '',
+          terminalPid: s.terminalPid,
+        });
+        if (opened) return;
+
+        const latestSessions = await api.getSessions();
+        sessions = latestSessions;
+        scheduleListRender(latestSessions);
+        const refreshedSession = latestSessions.find(x => x.id === s.id);
+        if (refreshedSession && isDetachedSession(refreshedSession)) {
+          activeId = refreshedSession.id;
+          setDetailNotice('This session was marked detached because VS Code no longer reports it. Check debug-log for the exact desync reason.');
+          return;
+        }
+        setDetailNotice('Could not open this session in VS Code. Check debug-log for the open path and failure reason.');
+      }
+
+      function setDetailNotice(message, kind = 'warning') {
+        const notice = document.getElementById('detail-notice');
+        if (!notice) return;
+        notice.textContent = message;
+        notice.classList.toggle('hidden', !message);
+        notice.classList.toggle('info', kind === 'info');
+      }
+
+      async function removeSession(id) {
+        await api.removeSession(id);
+      }
+
+      function toggleSidebarAddMenu() {
+        document.getElementById('sidebar-add-menu').classList.toggle('hidden');
+      }
+
+      function closeSidebarAddMenu() {
+        document.getElementById('sidebar-add-menu').classList.add('hidden');
+      }
+
+      function showManualTaskModal() {
+        closeSidebarAddMenu();
+        const input = document.getElementById('input-manual-task-text');
+        input.value = '';
+        document.getElementById('manual-task-modal').classList.remove('hidden');
+        setTimeout(() => input.focus(), 50);
+      }
+
+      function closeManualTaskModal() {
+        document.getElementById('manual-task-modal').classList.add('hidden');
+      }
+
+      async function confirmManualTask() {
+        const input = document.getElementById('input-manual-task-text');
+        const text = input.value.trim();
+        if (!text) {
+          alert('Task text is required.');
+          return;
+        }
+        if (!api.addManualTask) {
+          alert('Manual tasks are not available in this build.');
+          return;
+        }
+
+        const task = await api.addManualTask(text);
+        if (!task) {
+          alert('Could not add this task.');
+          return;
+        }
+
+        manualTasks = [task, ...manualTasks.filter(existing => existing.id !== task.id)];
+        closeManualTaskModal();
+        renderNextUp();
+      }
+
+      function showRecurringTaskModal() {
+        closeSidebarAddMenu();
+        document.getElementById('input-recurring-task-text').value = '';
+        document.getElementById('input-recurring-task-time').value = '08:00';
+        setRecurringWeekdays([1, 2, 3, 4, 5]);
+        renderRecurringTaskList();
+        document.getElementById('recurring-task-modal').classList.remove('hidden');
+        setTimeout(() => document.getElementById('input-recurring-task-text').focus(), 50);
+      }
+
+      function closeRecurringTaskModal() {
+        document.getElementById('recurring-task-modal').classList.add('hidden');
+      }
+
+      async function confirmRecurringTask() {
+        const text = document.getElementById('input-recurring-task-text').value.trim();
+        const time = document.getElementById('input-recurring-task-time').value.trim();
+        const daysOfWeek = getSelectedRecurringWeekdays();
+        if (!text) {
+          alert('Task text is required.');
+          return;
+        }
+        if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+          alert('Valid time is required.');
+          return;
+        }
+        if (daysOfWeek.length === 0) {
+          alert('Select at least one day.');
+          return;
+        }
+        if (!api.addRecurringTask) {
+          alert('Recurring tasks are not available in this build.');
+          return;
+        }
+
+        const task = await api.addRecurringTask(text, time, daysOfWeek);
+        if (!task) {
+          alert('Could not add this recurring task.');
+          return;
+        }
+
+        recurringTasks = [task, ...recurringTasks.filter(existing => existing.id !== task.id)];
+        document.getElementById('input-recurring-task-text').value = '';
+        renderRecurringTaskList();
+      }
+
+      function setRecurringWeekdays(days) {
+        const selected = new Set(days.map(day => String(day)));
+        document.querySelectorAll('#recurring-weekday-selector .weekday-btn').forEach(btn => {
+          btn.classList.toggle('active', selected.has(btn.dataset.day));
+        });
+      }
+
+      function getSelectedRecurringWeekdays() {
+        return [...document.querySelectorAll('#recurring-weekday-selector .weekday-btn.active')]
+          .map(btn => Number(btn.dataset.day))
+          .filter(day => Number.isInteger(day) && day >= 0 && day <= 6);
+      }
+
+      function renderRecurringTaskList() {
+        const container = document.getElementById('recurring-task-list');
+        if (!container) return;
+        if (recurringTasks.length === 0) {
+          container.innerHTML = '<div class="recurring-task-schedule">No recurring tasks yet.</div>';
+          return;
+        }
+
+        container.innerHTML = recurringTasks.map(task =>
+          '<div class="recurring-task-item" data-id="' + esc(task.id) + '">' +
+            '<div><div class="recurring-task-text">' + esc(task.text) + '</div>' +
+            '<div class="recurring-task-schedule">' + esc(formatRecurringSchedule(task)) + '</div></div>' +
+            '<button class="btn-xs remove btn-remove-recurring-task" title="Remove recurring task">Remove</button>' +
+          '</div>'
+        ).join('');
+        container.querySelectorAll('.btn-remove-recurring-task').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const item = btn.closest('.recurring-task-item');
+            const id = item ? item.dataset.id : '';
+            if (id) removeRecurringTaskSchedule(id);
+          });
+        });
+      }
+
+      async function removeRecurringTaskSchedule(id) {
+        recurringTasks = recurringTasks.filter(task => task.id !== id);
+        renderRecurringTaskList();
+        if (api.removeRecurringTask) await api.removeRecurringTask(id);
+      }
+
+      function formatRecurringSchedule(task) {
+        return 'Every ' + formatRecurringTime(task.time) + ' | ' + formatRecurringDays(task.daysOfWeek || []);
+      }
+
+      function formatRecurringTime(time) {
+        const match = /^(\d{2}):(\d{2})$/.exec(time || '');
+        if (!match) return time || '';
+        const hour = Number(match[1]);
+        const minute = Number(match[2]);
+        const period = hour >= 12 ? 'pm' : 'am';
+        const displayHour = hour % 12 || 12;
+        return minute === 0 ? displayHour + period : displayHour + ':' + String(minute).padStart(2, '0') + period;
+      }
+
+      function formatRecurringDays(days) {
+        const sortedDays = [...new Set(days)].sort((a, b) => a - b);
+        if (sortedDays.length === 7) return 'Every day';
+        if (arraysEqual(sortedDays, [1, 2, 3, 4, 5])) return 'Monday to Friday';
+        if (arraysEqual(sortedDays, [0, 6])) return 'Weekends';
+
+        const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        return sortedDays.map(day => names[day]).filter(Boolean).join(', ');
+      }
+
+      function arraysEqual(a, b) {
+        return a.length === b.length && a.every((value, index) => value === b[index]);
+      }
+
+      async function startSlackAuth() {
+        closeSidebarAddMenu();
+        if (!api.startSlackAuth) {
+          alert('Slack authorization is not available in this build.');
+          return;
+        }
+
+        try {
+          const result = await api.startSlackAuth();
+          if (!result || !result.ok) {
+            alert(result && result.message ? result.message : 'Could not start Slack authorization.');
+          }
+        } catch (error) {
+          alert('Could not start Slack authorization: ' + (error instanceof Error ? error.message : String(error)));
         }
       }
 
-      window.addEventListener('resize', () => {
-        if (activeId && terminals[activeId]) terminals[activeId].fitAddon.fit();
-      });
+      function showRenameSession(s) {
+        renameSessionId = s.id;
+        const input = document.getElementById('input-rename-session');
+        input.value = s.name;
+        document.getElementById('rename-session-modal').classList.remove('hidden');
+        setTimeout(() => {
+          input.focus();
+          input.select();
+        }, 50);
+      }
 
+      function closeRenameSession() {
+        renameSessionId = null;
+        document.getElementById('rename-session-modal').classList.add('hidden');
+      }
+
+      async function confirmRenameSession() {
+        if (!renameSessionId) return;
+        const nextName = document.getElementById('input-rename-session').value.trim();
+        if (!nextName) {
+          alert('Session name is required.');
+          return;
+        }
+
+        const session = await api.renameSession(renameSessionId, nextName);
+        if (!session) {
+          alert('Could not rename this session.');
+          return;
+        }
+
+        closeRenameSession();
+        upsertSession(session);
+        scheduleListRender(sessions);
+        activateSession(session.id);
+      }
+
+      document.getElementById('btn-rename-active').addEventListener('click', () => {
+        const s = sessions.find(x => x.id === activeId);
+        if (s) showRenameSession(s);
+      });
+      document.getElementById('btn-rename-summary').addEventListener('click', () => {
+        const s = sessions.find(x => x.id === activeId);
+        if (s) showRenameSession(s);
+      });
+      document.getElementById('btn-cancel-rename').addEventListener('click', closeRenameSession);
+      document.getElementById('btn-confirm-rename').addEventListener('click', confirmRenameSession);
+      document.getElementById('input-rename-session').addEventListener('keydown', e => {
+        if (e.key === 'Enter') confirmRenameSession();
+        if (e.key === 'Escape') closeRenameSession();
+      });
+      document.getElementById('btn-vscode-active').addEventListener('click', () => {
+        const s = sessions.find(x => x.id === activeId);
+        if (s) openSessionInVsCode(s);
+      });
+      document.getElementById('btn-vscode-summary').addEventListener('click', () => {
+        const s = sessions.find(x => x.id === activeId);
+        if (s) openSessionInVsCode(s);
+      });
       document.getElementById('btn-review-active').addEventListener('click', () => {
         const s = sessions.find(x => x.id === activeId);
         if (s) api.openReview(s.cwd);
       });
-      document.getElementById('btn-kill-active').addEventListener('click', () => {
-        if (activeId) api.killSession(activeId).then(() => cleanupTerminal(activeId));
+      document.getElementById('btn-review-summary').addEventListener('click', () => {
+        const s = sessions.find(x => x.id === activeId);
+        if (s) api.openReview(s.cwd);
+      });
+      document.getElementById('btn-remove-active').addEventListener('click', () => {
+        if (activeId) removeSession(activeId);
+      });
+      document.getElementById('btn-sidebar-add').addEventListener('click', e => {
+        e.stopPropagation();
+        toggleSidebarAddMenu();
+      });
+      document.getElementById('btn-add-manual-task').addEventListener('click', showManualTaskModal);
+      document.getElementById('btn-add-recurring-task').addEventListener('click', showRecurringTaskModal);
+      document.getElementById('btn-add-slack').addEventListener('click', startSlackAuth);
+      document.getElementById('btn-cancel-manual-task').addEventListener('click', closeManualTaskModal);
+      document.getElementById('btn-confirm-manual-task').addEventListener('click', confirmManualTask);
+      document.getElementById('input-manual-task-text').addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeManualTaskModal();
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) confirmManualTask();
+      });
+      document.getElementById('btn-cancel-recurring-task').addEventListener('click', closeRecurringTaskModal);
+      document.getElementById('btn-confirm-recurring-task').addEventListener('click', confirmRecurringTask);
+      document.querySelectorAll('#recurring-weekday-selector .weekday-btn').forEach(btn => {
+        btn.addEventListener('click', () => btn.classList.toggle('active'));
+      });
+      document.getElementById('input-recurring-task-text').addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeRecurringTaskModal();
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) confirmRecurringTask();
+      });
+      document.getElementById('btn-next-up-done').addEventListener('click', markNextUpContextDone);
+      document.getElementById('btn-next-up-move-up').addEventListener('click', () => moveNextUpContext(-1));
+      document.getElementById('btn-next-up-move-down').addEventListener('click', () => moveNextUpContext(1));
+      document.addEventListener('click', e => {
+        if (!document.getElementById('sidebar-header').contains(e.target)) closeSidebarAddMenu();
+        if (!document.getElementById('next-up-menu').contains(e.target)) closeNextUpMenu();
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key !== 'Escape') return;
+        closeSidebarAddMenu();
+        closeNextUpMenu();
+        closeManualTaskModal();
+        closeRecurringTaskModal();
+      });
+      document.getElementById('btn-clear-slack').addEventListener('click', async () => {
+        slackNotifications = [];
+        renderSlackNotifications();
+        if (api.clearSlackNotifications) await api.clearSlackNotifications();
       });
 
       document.getElementById('btn-new').addEventListener('click', async () => {
         const s = await api.getSettings();
         newShellType = s.defaultShell || 'powershell';
         document.getElementById('input-name').value = '';
+        document.getElementById('input-ssh-command').value = '';
         document.getElementById('input-cmd').value = '';
         document.getElementById('input-cwd').value = '';
-        document.getElementById('input-ssh-host').value = '';
         setShellSelector('new-shell-selector', newShellType);
-        document.getElementById('ssh-host-group').style.display = newShellType === 'ssh' ? '' : 'none';
-        document.getElementById('cwd-group').style.display = newShellType === 'ssh' ? 'none' : '';
+        updateNewSessionMode();
         document.getElementById('new-session-modal').classList.remove('hidden');
         setTimeout(() => document.getElementById('input-name').focus(), 50);
       });
@@ -479,17 +1479,24 @@
         if (dir) document.getElementById('input-cwd').value = dir;
       });
       document.getElementById('btn-confirm-new').addEventListener('click', async () => {
-        const name    = document.getElementById('input-name').value.trim();
-        const cmd     = document.getElementById('input-cmd').value.trim();
-        const cwd     = document.getElementById('input-cwd').value.trim();
-        const sshHost = document.getElementById('input-ssh-host').value.trim();
+        const name = document.getElementById('input-name').value.trim();
+        const sshCommand = document.getElementById('input-ssh-command').value.trim();
+        const cmd = document.getElementById('input-cmd').value.trim();
+        const cwd = document.getElementById('input-cwd').value.trim();
         if (!name) { alert('Session name is required.'); return; }
-        if (newShellType === 'ssh' && !sshHost) { alert('SSH host is required.'); return; }
-        if (newShellType !== 'ssh' && !cwd) { alert('Working directory is required.'); return; }
+        if (newShellType === 'ssh') {
+          if (!sshCommand) { alert('SSH command is required.'); return; }
+        } else if (!cwd) {
+          alert('Working directory is required.');
+          return;
+        }
         document.getElementById('new-session-modal').classList.add('hidden');
-        const id = await api.createSession(name, cmd, cwd, newShellType, sshHost);
-        ensureTerminal(id);
-        activateSession(id);
+        const session = await api.createSession(name, cmd, cwd, newShellType, sshCommand);
+        if (session) {
+          upsertSession(session);
+          scheduleListRender(sessions);
+          activateSession(session.id);
+        }
       });
       document.getElementById('input-cwd').addEventListener('keydown', e => {
         if (e.key === 'Enter') document.getElementById('btn-confirm-new').click();
@@ -498,7 +1505,6 @@
       document.getElementById('btn-settings').addEventListener('click', async () => {
         const s = await api.getSettings();
         document.getElementById('settings-review-tool').value = s.reviewTool;
-        document.getElementById('settings-idle-timeout').value = String(s.idleTimeout);
         setShellSelector('settings-shell-selector', s.defaultShell || 'powershell');
         document.getElementById('settings-modal').classList.remove('hidden');
       });
@@ -506,25 +1512,98 @@
         document.getElementById('settings-modal').classList.add('hidden');
       });
       document.getElementById('btn-save-settings').addEventListener('click', async () => {
-        const reviewTool  = document.getElementById('settings-review-tool').value.trim();
-        const idleTimeout = parseInt(document.getElementById('settings-idle-timeout').value, 10);
+        const reviewTool = document.getElementById('settings-review-tool').value.trim();
         const activeShellBtn = document.querySelector('#settings-shell-selector .shell-btn.active');
         const defaultShell = activeShellBtn ? activeShellBtn.dataset.shell : 'powershell';
-        await api.setSettings({ reviewTool: reviewTool || 'code {path}', idleTimeout: idleTimeout || 800, defaultShell });
+        await api.setSettings({ reviewTool: reviewTool || 'code {path}', defaultShell });
         document.getElementById('settings-modal').classList.add('hidden');
       });
 
       document.querySelectorAll('.modal-overlay').forEach(overlay => {
-        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.add('hidden'); });
+        overlay.addEventListener('click', e => {
+          if (e.target !== overlay) return;
+          if (overlay.id === 'rename-session-modal') closeRenameSession();
+          else overlay.classList.add('hidden');
+        });
       });
 
-      // Init shell selectors
       initShellSelector('new-shell-selector', shell => {
         newShellType = shell;
-        document.getElementById('ssh-host-group').style.display = shell === 'ssh' ? '' : 'none';
-        document.getElementById('cwd-group').style.display = shell === 'ssh' ? 'none' : '';
+        updateNewSessionMode();
       });
       initShellSelector('settings-shell-selector', () => {});
+
+      function updateNewSessionMode() {
+        const ssh = newShellType === 'ssh';
+        document.getElementById('ssh-command-group').classList.toggle('hidden', !ssh);
+        document.getElementById('btn-pick-dir').style.display = ssh ? 'none' : '';
+        document.getElementById('input-cmd-label').textContent = ssh ? 'Remote command to run (optional)' : 'Command to run (AI CLI)';
+        document.getElementById('input-cwd-label').textContent = ssh ? 'Remote project path (optional)' : 'Working directory';
+        document.getElementById('input-cmd').placeholder = ssh ? 'e.g. codex' : 'e.g. claude, codex';
+        document.getElementById('input-cwd').placeholder = ssh ? '/srv/my-app' : 'C:\\Projects\\my-app';
+      }
+
+      function isSshSession(s) {
+        return s.shellType === 'ssh';
+      }
+
+      function sessionLocationText(s) {
+        if (isSshSession(s)) return s.cwd || s.sshCommand || '(ssh)';
+        return s.cwd;
+      }
+
+      function normalizeStatus(status) {
+        if (
+          status === 'starting' ||
+          status === 'running' ||
+          status === 'needs_attention' ||
+          status === 'error' ||
+          status === 'stopped' ||
+          status === 'detached'
+        ) {
+          return status;
+        }
+        return 'waiting';
+      }
+
+      function statusLabel(status) {
+        switch (normalizeStatus(status)) {
+          case 'starting': return 'STARTING';
+          case 'running': return 'RUNNING';
+          case 'needs_attention': return 'NEEDS INPUT';
+          case 'error': return 'ERROR';
+          case 'stopped': return 'STOPPED';
+          case 'detached': return 'DETACHED';
+          default: return 'WAITING';
+        }
+      }
+
+      function isDetachedSession(s) {
+        return normalizeStatus(s.status) === 'detached';
+      }
+
+      function terminalStatusText(s) {
+        const status = normalizeStatus(s.status);
+        let text = statusLabel(status);
+        if (s.terminalExitCode !== undefined) text += ' (exit ' + s.terminalExitCode + ')';
+        if (s.terminalExitReason) text += ' - ' + s.terminalExitReason;
+        return text;
+      }
+
+      function terminalCaptureText(s) {
+        switch (s.terminalCaptureState) {
+          case 'capturing':
+            return 'Live output active';
+          case 'waiting_for_execution':
+            return s.terminalCaptureReason ||
+              'Connected for focus; output capture starts with the next shell command.';
+          case 'unavailable':
+            return s.terminalCaptureReason ||
+              'VS Code cannot expose live output for the current command.';
+          default:
+            return '';
+        }
+      }
 
       function esc(str) {
         return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

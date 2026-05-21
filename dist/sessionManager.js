@@ -1,179 +1,371 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SessionManager = void 0;
-const pty = __importStar(require("node-pty"));
 const node_events_1 = require("node:events");
 const node_child_process_1 = require("node:child_process");
 const node_crypto_1 = require("node:crypto");
-const STATUS_PRIORITY = {
-    waiting: 0,
-    error: 1,
-    running: 2,
-    stopped: 3,
-};
+const terminalEvents_1 = require("./terminalEvents");
+const SESSION_UPDATE_DEBOUNCE_MS = 250;
+const GIT_CHANGE_CHECK_DEBOUNCE_MS = 1000;
+const INITIAL_SESSION_STATUS = 'needs_attention';
 class SessionManager extends node_events_1.EventEmitter {
-    idleTimeout;
     sessions = new Map();
-    persistedSessions = new Set();
-    constructor(idleTimeout = 800) {
-        super();
-        this.idleTimeout = idleTimeout;
-    }
-    markSessionAsPersisted(id) {
-        this.persistedSessions.add(id);
-    }
-    getPersistedSessionIds() {
-        return Array.from(this.persistedSessions).filter(id => this.sessions.has(id));
-    }
-    createSession(name, cmd, cwd, shellType = 'powershell', sshHost = '') {
-        const id = (0, node_crypto_1.randomUUID)();
-        let shell;
-        let shellArgs;
-        if (shellType === 'ssh') {
-            shell = 'ssh';
-            shellArgs = [sshHost];
+    updateTimeout = null;
+    terminalEventParser = new terminalEvents_1.TerminalEventParser();
+    createSession(name, cmd, cwd, shellType = 'powershell', requestedId = '', sshCommand = '', vscodeWindowId = '', terminalRef = '', terminalPid) {
+        const id = requestedId.trim() || (0, node_crypto_1.randomUUID)();
+        const trimmedSshCommand = sshCommand.trim();
+        const trimmedVsCodeWindowId = vscodeWindowId.trim();
+        const trimmedTerminalRef = terminalRef.trim();
+        const effectiveCwd = shellType === 'ssh'
+            ? cwd.trim()
+            : cwd || process.env['USERPROFILE'] || process.env['HOME'] || '/';
+        const now = Date.now();
+        const existingEntry = this.sessions.get(id);
+        if (existingEntry) {
+            existingEntry.session.name = name;
+            existingEntry.session.cmd = cmd;
+            existingEntry.session.cwd = effectiveCwd;
+            existingEntry.session.shellType = shellType;
+            if (trimmedSshCommand) {
+                existingEntry.session.sshCommand = trimmedSshCommand;
+            }
+            else {
+                delete existingEntry.session.sshCommand;
+            }
+            if (trimmedVsCodeWindowId)
+                existingEntry.session.vscodeWindowId = trimmedVsCodeWindowId;
+            if (trimmedTerminalRef)
+                existingEntry.session.terminalRef = trimmedTerminalRef;
+            if (terminalPid !== undefined)
+                existingEntry.session.terminalPid = terminalPid;
+            if (existingEntry.session.status !== INITIAL_SESSION_STATUS)
+                existingEntry.statusChangedAt = now;
+            existingEntry.session.status = INITIAL_SESSION_STATUS;
+            existingEntry.session.lastActivity = now;
+            delete existingEntry.session.terminalExitCode;
+            delete existingEntry.session.terminalExitReason;
+            delete existingEntry.session.terminalCaptureState;
+            delete existingEntry.session.terminalCaptureReason;
+            existingEntry.lastEffectiveUpdateAt = now;
+            existingEntry.lastTerminalUpdateAt = 0;
+            this.terminalEventParser.reset(id);
+            this.emit('sessionUpdate', this.getSessions());
+            this.checkGitChangesNow(existingEntry);
+            return { ...existingEntry.session };
         }
-        else if (shellType === 'bash') {
-            shell = 'bash';
-            shellArgs = [];
-        }
-        else {
-            shell = 'powershell.exe';
-            shellArgs = [];
-        }
-        const effectiveCwd = cwd || process.env['USERPROFILE'] || process.env['HOME'] || '/';
-        const ptyProc = pty.spawn(shell, shellArgs, {
-            name: 'xterm-color',
-            cols: 80,
-            rows: 24,
-            cwd: effectiveCwd,
-            env: process.env,
-        });
         const session = {
             id,
             name,
             cmd,
             cwd: effectiveCwd,
             shellType,
-            sshHost,
-            status: 'running',
-            lastOutput: Date.now(),
-            pid: ptyProc.pid,
+            status: INITIAL_SESSION_STATUS,
+            lastActivity: now,
             gitChanges: false,
         };
-        const entry = { session, ptyProc, idleTimer: null };
+        if (trimmedSshCommand)
+            session.sshCommand = trimmedSshCommand;
+        if (trimmedVsCodeWindowId)
+            session.vscodeWindowId = trimmedVsCodeWindowId;
+        if (trimmedTerminalRef)
+            session.terminalRef = trimmedTerminalRef;
+        if (terminalPid !== undefined)
+            session.terminalPid = terminalPid;
+        const entry = {
+            session,
+            createdAt: now,
+            lastEffectiveUpdateAt: now,
+            lastTerminalUpdateAt: 0,
+            statusChangedAt: now,
+            gitCheckTimeout: null,
+        };
         this.sessions.set(id, entry);
-        ptyProc.onData((data) => {
-            session.lastOutput = Date.now();
-            if (session.status !== 'running') {
-                session.status = 'running';
-                this.emit('sessionUpdate', this.getSessions());
-            }
-            this.resetIdleTimer(entry);
-            if (shellType !== 'ssh')
-                this.parseCwd(data, session);
-            this.emit('output', id, data);
-        });
-        ptyProc.onExit(({ exitCode }) => {
-            if (entry.idleTimer)
-                clearTimeout(entry.idleTimer);
-            session.status = exitCode === 0 ? 'stopped' : 'error';
-            this.emit('sessionUpdate', this.getSessions());
-        });
-        if (cmd.trim()) {
-            ptyProc.write(cmd + '\r');
-        }
         this.emit('sessionUpdate', this.getSessions());
-        return id;
+        this.checkGitChangesNow(entry);
+        return { ...session };
     }
-    resetIdleTimer(entry) {
-        if (entry.idleTimer)
-            clearTimeout(entry.idleTimer);
-        entry.idleTimer = setTimeout(() => {
-            if (entry.session.status === 'running') {
-                entry.session.status = 'waiting';
-                this.emit('sessionUpdate', this.getSessions());
-                if (entry.session.shellType !== 'ssh')
-                    void this.checkGitChanges(entry);
+    touchSession(id) {
+        const entry = this.sessions.get(id);
+        if (!entry)
+            return null;
+        const now = Date.now();
+        entry.session.lastActivity = now;
+        entry.lastEffectiveUpdateAt = now;
+        this.emit('sessionUpdate', this.getSessions());
+        this.scheduleGitChangesCheck(entry);
+        return { ...entry.session };
+    }
+    updateTerminalState(update) {
+        const entry = this.sessions.get(update.id);
+        if (!entry)
+            return null;
+        if (entry.session.status === 'detached')
+            return { ...entry.session };
+        if (update.occurredAt < entry.lastTerminalUpdateAt)
+            return { ...entry.session };
+        return this.applyTerminalUpdate(entry, update);
+    }
+    updateTerminalEvent(event) {
+        const entry = this.sessions.get(event.id);
+        if (!entry)
+            return null;
+        if (entry.session.status === 'detached' && !this.restoreDetachedSessionFromTerminalEvent(entry, event)) {
+            return { ...entry.session };
+        }
+        if (event.occurredAt < entry.lastTerminalUpdateAt)
+            return { ...entry.session };
+        const terminalBinding = {};
+        if (event.windowId)
+            terminalBinding.vscodeWindowId = event.windowId;
+        if (event.terminalRef)
+            terminalBinding.terminalRef = event.terminalRef;
+        if (event.terminalPid !== undefined)
+            terminalBinding.terminalPid = event.terminalPid;
+        if (event.captureState)
+            terminalBinding.terminalCaptureState = event.captureState;
+        if (event.captureReason)
+            terminalBinding.terminalCaptureReason = event.captureReason;
+        const bindingChanged = this.updateSessionTerminalBinding(entry, terminalBinding);
+        const update = this.terminalEventParser.toTerminalUpdate(event, entry.session.status);
+        if (!update) {
+            entry.lastTerminalUpdateAt = event.occurredAt;
+            if (bindingChanged)
+                this.emitUpdateDebounced();
+            return { ...entry.session };
+        }
+        const session = this.applyTerminalUpdate(entry, update);
+        if (bindingChanged)
+            this.emitUpdateDebounced();
+        return session;
+    }
+    bindSessionToVsCodeWindow(id, windowId) {
+        const entry = this.sessions.get(id);
+        if (!entry)
+            return null;
+        const windowOwnerChanged = this.updateSessionTerminalBinding(entry, { vscodeWindowId: windowId });
+        if (windowOwnerChanged)
+            this.emitUpdateDebounced();
+        return { ...entry.session };
+    }
+    bindSessionToTerminal(id, binding) {
+        const entry = this.sessions.get(id);
+        if (!entry)
+            return null;
+        const bindingChanged = this.updateSessionTerminalBinding(entry, binding);
+        if (entry.session.status === 'detached') {
+            entry.session.status = INITIAL_SESSION_STATUS;
+            entry.statusChangedAt = Date.now();
+            delete entry.session.terminalExitCode;
+            delete entry.session.terminalExitReason;
+            this.terminalEventParser.reset(id);
+            this.emit('sessionUpdate', this.getSessions());
+            return { ...entry.session };
+        }
+        if (bindingChanged)
+            this.emitUpdateDebounced();
+        return { ...entry.session };
+    }
+    renameSession(id, name) {
+        const entry = this.sessions.get(id);
+        if (!entry)
+            return null;
+        const nextName = name.trim();
+        if (!nextName)
+            return null;
+        if (entry.session.name !== nextName) {
+            entry.session.name = nextName;
+            this.emit('sessionUpdate', this.getSessions());
+        }
+        return { ...entry.session };
+    }
+    restoreDetachedSessionFromTerminalEvent(entry, event) {
+        if (event.type === 'terminal_closed' || event.type === 'terminal_disconnected')
+            return false;
+        const eventWindowId = event.windowId?.trim();
+        const sessionWindowId = entry.session.vscodeWindowId?.trim();
+        const eventTerminalRef = event.terminalRef?.trim();
+        const sessionTerminalRef = entry.session.terminalRef?.trim();
+        const windowMatches = Boolean(eventWindowId && sessionWindowId && eventWindowId === sessionWindowId);
+        const terminalMatches = Boolean(eventTerminalRef && sessionTerminalRef && eventTerminalRef === sessionTerminalRef);
+        if (!windowMatches && !terminalMatches)
+            return false;
+        entry.session.status = INITIAL_SESSION_STATUS;
+        entry.statusChangedAt = event.occurredAt;
+        delete entry.session.terminalExitCode;
+        delete entry.session.terminalExitReason;
+        this.terminalEventParser.reset(event.id);
+        return true;
+    }
+    updateSessionTerminalBinding(entry, binding) {
+        let changed = false;
+        const normalizedWindowId = binding.vscodeWindowId?.trim();
+        if (normalizedWindowId && entry.session.vscodeWindowId !== normalizedWindowId) {
+            entry.session.vscodeWindowId = normalizedWindowId;
+            changed = true;
+        }
+        const normalizedTerminalRef = binding.terminalRef?.trim();
+        if (normalizedTerminalRef && entry.session.terminalRef !== normalizedTerminalRef) {
+            entry.session.terminalRef = normalizedTerminalRef;
+            changed = true;
+        }
+        if (binding.terminalPid !== undefined && entry.session.terminalPid !== binding.terminalPid) {
+            entry.session.terminalPid = binding.terminalPid;
+            changed = true;
+        }
+        if (binding.terminalCaptureState) {
+            const captureReason = binding.terminalCaptureReason?.trim();
+            if (entry.session.terminalCaptureState !== binding.terminalCaptureState ||
+                entry.session.terminalCaptureReason !== captureReason) {
+                entry.session.terminalCaptureState = binding.terminalCaptureState;
+                if (captureReason) {
+                    entry.session.terminalCaptureReason = captureReason;
+                }
+                else {
+                    delete entry.session.terminalCaptureReason;
+                }
+                changed = true;
             }
-        }, this.idleTimeout);
+        }
+        if (changed)
+            entry.lastEffectiveUpdateAt = Math.max(entry.lastEffectiveUpdateAt, Date.now());
+        return changed;
     }
-    parseCwd(data, session) {
-        // Windows PowerShell: PS C:\some\path>
-        const psMatch = /PS ([A-Za-z]:[^\r\n>]+)>/.exec(data);
-        if (psMatch?.[1]) {
-            session.cwd = psMatch[1].trim();
+    applyTerminalUpdate(entry, update) {
+        const previousStatus = entry.session.status;
+        const previousExitCode = entry.session.terminalExitCode;
+        const previousExitReason = entry.session.terminalExitReason;
+        entry.lastTerminalUpdateAt = update.occurredAt;
+        entry.lastEffectiveUpdateAt = Math.max(entry.lastEffectiveUpdateAt, update.occurredAt, Date.now());
+        if (previousStatus !== update.status)
+            entry.statusChangedAt = update.occurredAt;
+        entry.session.status = update.status;
+        entry.session.lastActivity = update.occurredAt;
+        if (update.exitCode !== undefined) {
+            entry.session.terminalExitCode = update.exitCode;
+        }
+        else if (update.status !== 'error' && update.status !== 'stopped') {
+            delete entry.session.terminalExitCode;
+        }
+        if (update.exitReason !== undefined) {
+            entry.session.terminalExitReason = update.exitReason;
+        }
+        else if (update.status !== 'error' && update.status !== 'stopped') {
+            delete entry.session.terminalExitReason;
+        }
+        if (update.status === 'error' || update.status === 'stopped' || update.status === 'detached') {
+            delete entry.session.terminalCaptureState;
+            delete entry.session.terminalCaptureReason;
+        }
+        if (previousStatus !== entry.session.status ||
+            previousExitCode !== entry.session.terminalExitCode ||
+            previousExitReason !== entry.session.terminalExitReason) {
+            this.emit('sessionUpdate', this.getSessions());
+        }
+        else {
+            this.emitUpdateDebounced();
+        }
+        this.scheduleGitChangesCheck(entry);
+        return { ...entry.session };
+    }
+    refreshGitChanges() {
+        this.sessions.forEach(entry => {
+            this.checkGitChangesNow(entry);
+        });
+    }
+    emitUpdateDebounced() {
+        if (this.updateTimeout)
+            clearTimeout(this.updateTimeout);
+        this.updateTimeout = setTimeout(() => {
+            this.emit('sessionUpdate', this.getSessions());
+            this.updateTimeout = null;
+        }, SESSION_UPDATE_DEBOUNCE_MS);
+    }
+    scheduleGitChangesCheck(entry) {
+        if (entry.gitCheckTimeout)
+            clearTimeout(entry.gitCheckTimeout);
+        entry.gitCheckTimeout = setTimeout(() => {
+            entry.gitCheckTimeout = null;
+            void this.checkGitChanges(entry);
+        }, GIT_CHANGE_CHECK_DEBOUNCE_MS);
+    }
+    checkGitChangesNow(entry) {
+        this.clearScheduledGitChangesCheck(entry);
+        void this.checkGitChanges(entry);
+    }
+    clearScheduledGitChangesCheck(entry) {
+        if (!entry.gitCheckTimeout)
             return;
-        }
-        // Unix bash/zsh: user@host:/path$ or ~/path$
-        const unixMatch = /(?:[\w-]+@[\w-]+:)?([~/][^\r\n$#]*)[$#]/.exec(data);
-        if (unixMatch?.[1]) {
-            const home = process.env['HOME'] ?? '';
-            session.cwd = unixMatch[1].replace('~', home).trim();
-        }
+        clearTimeout(entry.gitCheckTimeout);
+        entry.gitCheckTimeout = null;
     }
     checkGitChanges(entry) {
+        if (entry.session.shellType === 'ssh') {
+            if (entry.session.gitChanges) {
+                entry.session.gitChanges = false;
+                this.emitUpdateDebounced();
+            }
+            return Promise.resolve();
+        }
         return new Promise((resolve) => {
             (0, node_child_process_1.exec)('git status --porcelain', { cwd: entry.session.cwd }, (err, stdout) => {
-                entry.session.gitChanges = !err && stdout.trim().length > 0;
-                this.emit('sessionUpdate', this.getSessions());
+                const newGitChanges = !err && stdout.trim().length > 0;
+                if (entry.session.gitChanges !== newGitChanges) {
+                    entry.session.gitChanges = newGitChanges;
+                    this.emitUpdateDebounced();
+                }
                 resolve();
             });
         });
     }
-    sendInput(id, data) {
-        this.sessions.get(id)?.ptyProc.write(data);
-    }
-    resizeSession(id, cols, rows) {
-        this.sessions.get(id)?.ptyProc.resize(cols, rows);
-    }
-    killSession(id) {
+    removeSession(id) {
         const entry = this.sessions.get(id);
         if (!entry)
             return;
-        if (entry.idleTimer)
-            clearTimeout(entry.idleTimer);
-        entry.ptyProc.kill();
+        this.clearScheduledGitChangesCheck(entry);
         this.sessions.delete(id);
+        this.terminalEventParser.reset(id);
         this.emit('sessionUpdate', this.getSessions());
+    }
+    detachSession(id) {
+        const entry = this.sessions.get(id);
+        if (!entry)
+            return null;
+        const now = Date.now();
+        if (entry.session.status !== 'detached')
+            entry.statusChangedAt = now;
+        entry.session.status = 'detached';
+        entry.session.lastActivity = now;
+        delete entry.session.terminalExitCode;
+        delete entry.session.terminalExitReason;
+        delete entry.session.terminalCaptureState;
+        delete entry.session.terminalCaptureReason;
+        entry.lastEffectiveUpdateAt = now;
+        entry.lastTerminalUpdateAt = now;
+        this.terminalEventParser.reset(id);
+        this.emit('sessionUpdate', this.getSessions());
+        this.scheduleGitChangesCheck(entry);
+        return { ...entry.session };
+    }
+    getSession(id) {
+        const entry = this.sessions.get(id);
+        return entry ? { ...entry.session } : null;
     }
     getSessions() {
         return [...this.sessions.values()]
-            .map(e => ({ ...e.session }))
-            .sort((a, b) => STATUS_PRIORITY[a.status] - STATUS_PRIORITY[b.status]);
+            .sort((a, b) => {
+            const byNeedInput = sessionStatusPriority(a.session.status) - sessionStatusPriority(b.session.status);
+            if (byNeedInput !== 0)
+                return byNeedInput;
+            const byStatusChangedAt = a.statusChangedAt - b.statusChangedAt;
+            if (byStatusChangedAt !== 0)
+                return byStatusChangedAt;
+            return a.createdAt - b.createdAt;
+        })
+            .map(e => ({ ...e.session }));
     }
 }
 exports.SessionManager = SessionManager;
+function sessionStatusPriority(status) {
+    return status === 'needs_attention' ? 0 : 1;
+}

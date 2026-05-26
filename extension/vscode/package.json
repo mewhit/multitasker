@@ -8,7 +8,7 @@
     "url": "https://github.com/multitasker/vscode-companion.git",
     "directory": ""
   },
-  "version": "0.0.14",
+  "version": "0.0.16",
   "private": true,
   "publisher": "multitasker",
   "engines": {
@@ -50,7 +50,7 @@
         "multitasker.debugTerminalStatus": {
           "type": "boolean",
           "default": false,
-          "description": "Write terminal status diagnostics to the Multitasker Terminal Status output channel and debug-log\\.multitasker-terminal-debug*.log files. File logs include terminal output only for shell executions VS Code exposes after Multitasker connects."
+          "description": "Write terminal status diagnostics to the Multitasker Terminal Status output channel."
         }
       }
     }

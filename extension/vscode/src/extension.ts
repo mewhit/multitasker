@@ -123,6 +123,7 @@ const DEBUG_LOG_DIRECTORY = 'debug-log';
 const DEBUG_TERMINAL_STATUS_FILE = '.multitasker-terminal-debug.log';
 const DEBUG_TERMINAL_STATUS_FILE_PREFIX = '.multitasker-terminal-debug';
 const DEBUG_TERMINAL_STATUS_FILE_EXTENSION = '.log';
+const DEBUG_TERMINAL_STATUS_FILE_LOGS_ENABLED = false;
 const ATTACHED_TERMINAL_CAPTURE_REASON =
   'Connected for focus; VS Code only exposes output from shell executions started after Multitasker attached.';
 const WAITING_TERMINAL_CAPTURE_REASON =
@@ -145,6 +146,7 @@ const terminalEventDeliveryByRef = new Map<string, Promise<void>>();
 const executionIdByExecution = new WeakMap<vscode.TerminalShellExecution, string>();
 const consumedExecutions = new WeakSet<vscode.TerminalShellExecution>();
 const reportedDebugFileWriteFailures = new Set<string>();
+const connectedTerminalRefs = new Set<string>();
 const vscodeWindowId = randomUUID();
 let terminalStatusOutputChannel: vscode.OutputChannel | undefined;
 let debugFallbackRoot: string | undefined;
@@ -157,7 +159,7 @@ let nextExecutionSequence = 0;
 
 export function activate(context: vscode.ExtensionContext): void {
   debugFallbackRoot = context.globalStorageUri.fsPath;
-  migrateLegacyDebugFiles();
+  if (isTerminalStatusFileDebugEnabled()) migrateLegacyDebugFiles();
   context.subscriptions.push(
     vscode.commands.registerCommand('multitasker.startSession', (payload?: unknown) => startSessionCommand(payload)),
     vscode.commands.registerCommand('multitasker.attachTerminal', () => attachExistingTerminalCommand()),
@@ -180,6 +182,7 @@ export function deactivate(): void {
   latestTerminalEventAtByTerminalRef.clear();
   terminalByRef.clear();
   terminalRefByTerminal.clear();
+  connectedTerminalRefs.clear();
   launchIdByTerminal.clear();
   terminalProcessIdByTerminal.clear();
   disconnectedTerminalRefs.clear();
@@ -206,6 +209,9 @@ function showTerminalStatusLogs(): void {
   const debugFilePath = getDebugFilePath();
   const activeTerminal = vscode.window.activeTerminal;
   const activeTerminalDebugFilePath = activeTerminal ? getTerminalDebugFilePath(activeTerminal) : null;
+  if (!isTerminalStatusFileDebugEnabled()) {
+    channel.appendLine(`[${new Date().toISOString()}] Terminal status debug file logging is disabled.`);
+  }
   channel.appendLine(
     `[${new Date().toISOString()}] Terminal aggregate debug file: ${debugFilePath ?? '(no workspace folder)'}`
   );
@@ -399,8 +405,9 @@ function focusTerminalByRef(terminalRef: string): void {
     return;
   }
 
+  connectedTerminalRefs.add(terminalRef);
+  disconnectedTerminalRefs.delete(terminalRef);
   terminal.show(false);
-  void vscode.commands.executeCommand('workbench.action.terminal.focus');
   sendTerminalEvent(terminal, 'terminal_visible', {
     terminalName: terminal.name,
     ...getTerminalCaptureDetails(terminal),
@@ -414,6 +421,7 @@ function focusTerminalByRef(terminalRef: string): void {
 
 function disconnectTerminalByRef(terminalRef: string): void {
   const terminal = terminalByRef.get(terminalRef);
+  connectedTerminalRefs.delete(terminalRef);
   disconnectedTerminalRefs.add(terminalRef);
   terminalEventDeliveryByRef.delete(terminalRef);
   latestTerminalEventAtByTerminalRef.delete(terminalRef);
@@ -488,7 +496,7 @@ function formatDebugValue(value: unknown): string {
 }
 
 function appendDebugFile(content: string, terminal?: vscode.Terminal): void {
-  if (!isTerminalStatusDebugEnabled()) return;
+  if (!isTerminalStatusDebugEnabled() || !isTerminalStatusFileDebugEnabled()) return;
   const debugFilePaths = getDebugFilePaths(terminal);
   if (debugFilePaths.length === 0) {
     reportDebugFileWriteFailure('No workspace folder is available for the terminal debug file.');
@@ -509,7 +517,7 @@ function appendTerminalOutputDebugChunk(
   execution: vscode.TerminalShellExecution,
   output: string
 ): void {
-  if (!isTerminalStatusDebugEnabled()) return;
+  if (!isTerminalStatusDebugEnabled() || !isTerminalStatusFileDebugEnabled()) return;
   const terminalRef = terminalRefByTerminal.get(terminal);
   const timestamp = new Date().toISOString();
   appendDebugFile(
@@ -519,6 +527,10 @@ function appendTerminalOutputDebugChunk(
   );
   appendDebugFile(output, terminal);
   appendDebugFile(`\n[${timestamp}] terminal-output-end terminalRef=${formatDebugValue(terminalRef ?? '')}\n`, terminal);
+}
+
+function isTerminalStatusFileDebugEnabled(): boolean {
+  return DEBUG_TERMINAL_STATUS_FILE_LOGS_ENABLED;
 }
 
 function getDebugFilePath(terminal?: vscode.Terminal): string | null {
@@ -686,8 +698,7 @@ async function attachExistingTerminalCommand(): Promise<void> {
   const terminal = await pickExistingTerminal();
   if (!terminal) return;
 
-  const trackedTerminalRef = terminalRefByTerminal.get(terminal);
-  if (trackedTerminalRef) {
+  if (isTerminalConnected(terminal)) {
     terminal.show();
     sendTerminalEvent(terminal, 'terminal_visible', {
       terminalName: terminal.name,
@@ -725,11 +736,11 @@ async function pickExistingTerminal(): Promise<vscode.Terminal | undefined> {
 
   const activeTerminal = vscode.window.activeTerminal;
   const items: TerminalPickItem[] = terminals.map((terminal, index) => {
-    const trackedTerminalRef = terminalRefByTerminal.get(terminal);
-      const details = [
-        terminal === activeTerminal ? 'active' : '',
-        trackedTerminalRef ? 'focus connected' : '',
-      ].filter(Boolean);
+    const isConnectedTerminal = isTerminalConnected(terminal);
+    const details = [
+      terminal === activeTerminal ? 'active' : '',
+      isConnectedTerminal ? 'focus connected' : '',
+    ].filter(Boolean);
     return {
       label: terminal.name || `Terminal ${index + 1}`,
       description: details.join(', '),
@@ -746,7 +757,7 @@ async function pickExistingTerminal(): Promise<vscode.Terminal | undefined> {
 }
 
 async function pickConnectedTerminal(title: string): Promise<vscode.Terminal | undefined> {
-  const connectedTerminals = vscode.window.terminals.filter(terminal => terminalRefByTerminal.has(terminal));
+  const connectedTerminals = vscode.window.terminals.filter(isTerminalConnected);
   if (connectedTerminals.length === 0) {
     vscode.window.showWarningMessage('No terminal is connected to Multitasker.');
     return undefined;
@@ -754,7 +765,7 @@ async function pickConnectedTerminal(title: string): Promise<vscode.Terminal | u
 
   const activeTerminal = vscode.window.activeTerminal;
   if (connectedTerminals.length === 1) return connectedTerminals[0];
-  if (activeTerminal && terminalRefByTerminal.has(activeTerminal)) return activeTerminal;
+  if (activeTerminal && isTerminalConnected(activeTerminal)) return activeTerminal;
 
   const items: TerminalPickItem[] = connectedTerminals.map((terminal, index) => ({
     label: terminal.name || `Terminal ${index + 1}`,
@@ -934,8 +945,7 @@ function openSessionTerminal(launch: MultitaskerTerminalLaunch): vscode.Terminal
   }
 
   const terminal = vscode.window.createTerminal(terminalOptions);
-  const terminalRef = getTerminalRef(terminal);
-  disconnectedTerminalRefs.delete(terminalRef);
+  const terminalRef = markTerminalConnected(terminal);
   launchIdByTerminal.set(terminal, launch.launchId);
   void getTerminalProcessId(terminal);
   const launchCommand = getSessionLaunchCommand(launch);
@@ -965,8 +975,7 @@ function openSessionTerminal(launch: MultitaskerTerminalLaunch): vscode.Terminal
 }
 
 function attachTerminalToSession(terminal: vscode.Terminal, launch: MultitaskerTerminalLaunch): void {
-  const terminalRef = getTerminalRef(terminal);
-  disconnectedTerminalRefs.delete(terminalRef);
+  const terminalRef = markTerminalConnected(terminal);
   launchIdByTerminal.set(terminal, launch.launchId);
   void getTerminalProcessId(terminal);
   primaryCommandByTerminal.delete(terminal);
@@ -1019,6 +1028,18 @@ function getTerminalRef(terminal: vscode.Terminal): string {
   terminalByRef.set(terminalRef, terminal);
   void getTerminalProcessId(terminal);
   return terminalRef;
+}
+
+function markTerminalConnected(terminal: vscode.Terminal): string {
+  const terminalRef = getTerminalRef(terminal);
+  connectedTerminalRefs.add(terminalRef);
+  disconnectedTerminalRefs.delete(terminalRef);
+  return terminalRef;
+}
+
+function isTerminalConnected(terminal: vscode.Terminal): boolean {
+  const terminalRef = terminalRefByTerminal.get(terminal);
+  return Boolean(terminalRef && connectedTerminalRefs.has(terminalRef) && !disconnectedTerminalRefs.has(terminalRef));
 }
 
 async function getTerminalProcessId(terminal: vscode.Terminal): Promise<number | undefined> {
@@ -1080,6 +1101,8 @@ function runSessionCommand(terminal: vscode.Terminal, command: string): void {
 }
 
 function handleTerminalShellExecutionStarted(event: vscode.TerminalShellExecutionStartEvent): void {
+  if (!isTerminalConnected(event.terminal)) return;
+
   const terminalRef = getTerminalRef(event.terminal);
 
   setTerminalCaptureState(event.terminal, 'capturing', CAPTURING_TERMINAL_CAPTURE_REASON, false);
@@ -1130,6 +1153,8 @@ async function consumeTerminalExecutionOutput(
 }
 
 function handleTerminalShellExecutionEnded(event: vscode.TerminalShellExecutionEndEvent): void {
+  if (!isTerminalConnected(event.terminal)) return;
+
   getTerminalRef(event.terminal);
 
   setTerminalCaptureState(event.terminal, 'waiting_for_execution', WAITING_TERMINAL_CAPTURE_REASON, false);
@@ -1173,7 +1198,7 @@ function reportTerminalOutput(
 }
 
 function acknowledgeTrackedTerminal(terminal: vscode.Terminal | undefined): void {
-  if (!terminal || !isTerminalVisibleToUser(terminal)) return;
+  if (!terminal || !isTerminalConnected(terminal) || !isTerminalVisibleToUser(terminal)) return;
   sendTerminalEvent(terminal, 'terminal_visible', {
     terminalName: terminal.name,
     ...getTerminalCaptureDetails(terminal),
@@ -1181,7 +1206,7 @@ function acknowledgeTrackedTerminal(terminal: vscode.Terminal | undefined): void
 }
 
 function acknowledgeInteractedTerminal(terminal: vscode.Terminal): void {
-  if (!terminal.state.isInteractedWith) return;
+  if (!isTerminalConnected(terminal) || !terminal.state.isInteractedWith) return;
   sendTerminalEvent(terminal, 'terminal_interacted', {
     terminalName: terminal.name,
     ...getTerminalCaptureDetails(terminal),
@@ -1190,7 +1215,7 @@ function acknowledgeInteractedTerminal(terminal: vscode.Terminal): void {
 
 function closeTrackedTerminal(terminal: vscode.Terminal): void {
   const terminalRef = terminalRefByTerminal.get(terminal);
-  if (terminalRef) {
+  if (terminalRef && isTerminalConnected(terminal)) {
     const exitCode = terminal.exitStatus?.code;
     const exitReason = terminal.exitStatus ? terminalExitReasonLabel(terminal.exitStatus.reason) : '';
     const details: TerminalEventDetails = {
@@ -1532,6 +1557,7 @@ function forgetTerminal(terminal: vscode.Terminal): void {
     terminalByRef.delete(terminalRef);
     latestTerminalEventAtByTerminalRef.delete(terminalRef);
     terminalEventDeliveryByRef.delete(terminalRef);
+    connectedTerminalRefs.delete(terminalRef);
   }
   terminalRefByTerminal.delete(terminal);
   launchIdByTerminal.delete(terminal);

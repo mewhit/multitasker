@@ -18,6 +18,12 @@ export interface TerminalUpdate {
   exitCode?: number;
   exitReason?: string;
   debugReason?: string;
+  debugMatchedText?: string;
+}
+
+export interface TerminalEventApplyResult {
+  session: Session;
+  statusUpdate?: TerminalUpdate;
 }
 
 export interface Session {
@@ -162,12 +168,16 @@ export class SessionManager extends EventEmitter {
   }
 
   updateTerminalEvent(event: TerminalEvent): Session | null {
+    return this.updateTerminalEventWithDetails(event)?.session ?? null;
+  }
+
+  updateTerminalEventWithDetails(event: TerminalEvent): TerminalEventApplyResult | null {
     const entry = this.sessions.get(event.id);
     if (!entry) return null;
     if (entry.session.status === 'detached' && !this.restoreDetachedSessionFromTerminalEvent(entry, event)) {
-      return { ...entry.session };
+      return { session: { ...entry.session } };
     }
-    if (event.occurredAt < entry.lastTerminalUpdateAt) return { ...entry.session };
+    if (event.occurredAt < entry.lastTerminalUpdateAt) return { session: { ...entry.session } };
 
     const terminalBinding: TerminalBinding = {};
     if (event.windowId) terminalBinding.vscodeWindowId = event.windowId;
@@ -180,12 +190,12 @@ export class SessionManager extends EventEmitter {
     if (!update) {
       entry.lastTerminalUpdateAt = event.occurredAt;
       if (bindingChanged) this.emitUpdateDebounced();
-      return { ...entry.session };
+      return { session: { ...entry.session } };
     }
 
     const session = this.applyTerminalUpdate(entry, update);
     if (bindingChanged) this.emitUpdateDebounced();
-    return session;
+    return { session, statusUpdate: update };
   }
 
   bindSessionToVsCodeWindow(id: string, windowId: string): Session | null {

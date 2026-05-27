@@ -26,6 +26,70 @@ export interface Session {
 export interface AppSettings {
   reviewTool: string;
   defaultShell: LocalShellType;
+  googleCalendar: GoogleCalendarSettings;
+  githubReview: GitHubReviewSettings;
+}
+
+export interface GoogleCalendarSettings {
+  calendarId: string;
+  lookAheadDays: number;
+  enabled: boolean;
+  ownedCalendarsOnly: boolean;
+}
+
+export interface GitHubReviewSettings {
+  enabled: boolean;
+  owner: string;
+  repo: string;
+  pollMinutes: number;
+}
+
+export interface GoogleCalendarEvent {
+  id: string;
+  connectionId: string;
+  accountEmail?: string;
+  accountName?: string;
+  calendarId: string;
+  summary: string;
+  start: string;
+  end: string;
+  startMs: number;
+  endMs: number;
+  allDay: boolean;
+  htmlLink?: string;
+  location?: string;
+  updated?: string;
+}
+
+export interface GoogleCalendarStatus {
+  connected: boolean;
+  configured: boolean;
+  enabled: boolean;
+  calendarId: string;
+  lookAheadDays: number;
+  ownedCalendarsOnly: boolean;
+  accountCount: number;
+  eventCount: number;
+  lastSyncedAt?: number;
+  message: string;
+  connections: GoogleCalendarConnectionStatus[];
+}
+
+export interface GoogleCalendarConnectionStatus {
+  id: string;
+  accountEmail?: string;
+  accountName?: string;
+  calendarId: string;
+  lookAheadDays: number;
+  enabled: boolean;
+  connectedAt: number;
+  lastSyncedAt?: number;
+}
+
+export interface GoogleCalendarAuthResult {
+  ok: boolean;
+  message: string;
+  status: GoogleCalendarStatus;
 }
 
 export interface SessionState {
@@ -76,11 +140,24 @@ export interface ManualTask {
   createdAt: number;
 }
 
+export type RecurringTaskFrequency = 'weekly' | 'daily' | 'interval' | 'monthly';
+
+export interface RecurringTaskSchedule {
+  frequency: RecurringTaskFrequency;
+  daysOfWeek?: number[];
+  intervalDays?: number;
+  dayOfMonth?: number;
+}
+
 export interface RecurringTask {
   id: string;
   text: string;
   time: string;
+  frequency: RecurringTaskFrequency;
   daysOfWeek: number[];
+  intervalDays?: number;
+  dayOfMonth?: number;
+  anchorDate?: string;
   createdAt: number;
   enabled: boolean;
   lastGeneratedDate?: string;
@@ -132,8 +209,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecurringTasks: (): Promise<RecurringTask[]> =>
     ipcRenderer.invoke('recurring-task:list'),
 
-  addRecurringTask: (text: string, time: string, daysOfWeek: number[]): Promise<RecurringTask | null> =>
-    ipcRenderer.invoke('recurring-task:add', text, time, daysOfWeek),
+  addRecurringTask: (text: string, time: string, schedule: RecurringTaskSchedule | number[]): Promise<RecurringTask | null> =>
+    ipcRenderer.invoke('recurring-task:add', text, time, schedule),
 
   removeRecurringTask: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('recurring-task:remove', id),
@@ -177,6 +254,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   onSlackListenerStatus: (cb: (payload: { ok: boolean; message: string }) => void): void => {
     ipcRenderer.on('slack:listener-status', (_event, payload: { ok: boolean; message: string }) => cb(payload));
+  },
+
+  getGoogleCalendarEvents: (): Promise<GoogleCalendarEvent[]> =>
+    ipcRenderer.invoke('google-calendar:list'),
+
+  getGoogleCalendarStatus: (): Promise<GoogleCalendarStatus> =>
+    ipcRenderer.invoke('google-calendar:status'),
+
+  connectGoogleCalendar: (): Promise<GoogleCalendarAuthResult> =>
+    ipcRenderer.invoke('google-calendar:connect'),
+
+  disconnectGoogleCalendar: (id?: string): Promise<GoogleCalendarStatus> =>
+    ipcRenderer.invoke('google-calendar:disconnect', id),
+
+  refreshGoogleCalendar: (): Promise<GoogleCalendarStatus> =>
+    ipcRenderer.invoke('google-calendar:refresh'),
+
+  openGoogleCalendarEvent: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('google-calendar:open', id),
+
+  onGoogleCalendarListUpdate: (cb: (events: GoogleCalendarEvent[]) => void): void => {
+    ipcRenderer.on('google-calendar:list-update', (_event, events: GoogleCalendarEvent[]) => cb(events));
+  },
+
+  onGoogleCalendarStatusUpdate: (cb: (status: GoogleCalendarStatus) => void): void => {
+    ipcRenderer.on('google-calendar:status-update', (_event, status: GoogleCalendarStatus) => cb(status));
   },
 
   getSettings: (): Promise<AppSettings> =>

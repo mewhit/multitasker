@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TerminalEventParser = void 0;
 const TERMINAL_OUTPUT_TAIL_LENGTH = 4000;
+const AGENT_RUNNING_GRACE_PERIOD_MS = 5000;
+const STATUS_CHANGE_STABILIZATION_MS = 500;
 const INTERACTIVE_AGENT_COMMAND_PATTERN = /(^|[\s"'`\\/])(?:copilot(?:-cli)?|claude(?:-code)?|codex|gemini)(?:\.cmd|\.exe)?(?:\s|$)/i;
 const ICON_GATED_AGENT_COMMAND_PATTERN = /(^|[\s"'`\\/])(?:copilot(?:-cli)?|codex)(?:\.cmd|\.exe)?(?:\s|$)/i;
 const INPUT_REQUEST_PATTERNS = [
@@ -47,7 +49,7 @@ class TerminalEventParser {
             case 'shell_execution_started':
                 return this.handleShellExecutionStarted(event, state);
             case 'terminal_output':
-                return this.handleTerminalOutput(event, state);
+                return this.handleTerminalOutput(event, state, currentStatus);
             case 'shell_execution_ended':
                 return this.handleShellExecutionEnded(event, state);
             case 'terminal_closed':
@@ -92,16 +94,27 @@ class TerminalEventParser {
         state.awaitingInput = false;
         return this.buildUpdate(event, 'running', 'non-interactive shell execution started');
     }
-    handleTerminalOutput(event, state) {
+    handleTerminalOutput(event, state, currentStatus) {
         if (event.output === undefined || event.output.length === 0)
             return null;
-        const analysis = this.analyzeTerminalOutput(state, event.output, isIconGatedAgentOutput(event, state), event.captureState);
+        const analysis = this.analyzeTerminalOutput(state, event.output, isIconGatedAgentOutput(event, state), currentStatus, event.occurredAt);
+        const proposedStatus = analysis.requestsInput ? 'needs_attention' : 'running';
+        // Stabilization: avoid status flapping - only change if enough time has passed or status is stable
+        const timeSinceLastChange = state.lastStatusChangeAt > 0 ? event.occurredAt - state.lastStatusChangeAt : Infinity;
+        if (state.lastStatus && state.lastStatus !== proposedStatus && timeSinceLastChange < STATUS_CHANGE_STABILIZATION_MS) {
+            // Keep previous status to avoid flapping
+            return this.buildUpdate(event, state.lastStatus, `${analysis.reason} (stabilized)`, analysis.matchedText);
+        }
         if (analysis.requestsInput) {
             state.awaitingInput = true;
-            return this.buildUpdate(event, 'needs_attention', analysis.reason);
+            state.lastStatus = 'needs_attention';
+            state.lastStatusChangeAt = event.occurredAt;
+            return this.buildUpdate(event, 'needs_attention', analysis.reason, analysis.matchedText);
         }
         state.awaitingInput = false;
-        return this.buildUpdate(event, 'running', analysis.reason);
+        state.lastStatus = 'running';
+        state.lastStatusChangeAt = event.occurredAt;
+        return this.buildUpdate(event, 'running', analysis.reason, analysis.matchedText);
     }
     handleTerminalCaptureState(event, state) {
         if (event.captureState === 'capturing') {
@@ -134,16 +147,19 @@ class TerminalEventParser {
         }
         return this.buildUpdate(event, 'running', reason);
     }
-    analyzeTerminalOutput(state, output, iconGatedAgentOutput, captureState) {
+    analyzeTerminalOutput(state, output, iconGatedAgentOutput, currentStatus, occurredAt) {
         const normalizedOutput = stripTerminalControlSequences(output);
         const tail = appendTerminalOutputTail(state, normalizedOutput);
         const agentUiOutput = iconGatedAgentOutput || state.agentUiDetected || isAgentUiOutput(tail);
         if (agentUiOutput) {
             state.agentUiDetected = true;
-            if (hasAgentRunningIndicator(normalizedOutput)) {
+            const runningIndicatorLine = getAgentRunningIndicatorLine(normalizedOutput);
+            if (runningIndicatorLine) {
+                state.lastAgentRunningIndicatorAt = occurredAt;
                 return {
                     requestsInput: false,
                     reason: 'matched agent running indicator',
+                    matchedText: runningIndicatorLine,
                 };
             }
             const inputPattern = INPUT_REQUEST_PATTERNS.find(pattern => pattern.test(tail.trimEnd()));
@@ -151,12 +167,13 @@ class TerminalEventParser {
                 return {
                     requestsInput: true,
                     reason: `matched input pattern ${inputPattern.toString()}`,
+                    matchedText: tail.trimEnd().split(/\n/).slice(-1)[0] ?? '',
                 };
             }
-            if (captureState === 'capturing') {
+            if (currentStatus === 'running' && isWithinAgentRunningGracePeriod(state, occurredAt)) {
                 return {
                     requestsInput: false,
-                    reason: 'terminal output capture active',
+                    reason: `agent output without running indicator within ${AGENT_RUNNING_GRACE_PERIOD_MS}ms grace period`,
                 };
             }
             return {
@@ -169,6 +186,7 @@ class TerminalEventParser {
             return {
                 requestsInput: false,
                 reason: `matched running pattern ${runningPattern.toString()}`,
+                matchedText: getMatchingLine(normalizedOutput, runningPattern),
             };
         }
         const trimmedTail = tail.trimEnd();
@@ -177,6 +195,7 @@ class TerminalEventParser {
             return {
                 requestsInput: true,
                 reason: `matched input pattern ${inputPattern.toString()}`,
+                matchedText: trimmedTail.split(/\n/).slice(-1)[0] ?? '',
             };
         }
         return {
@@ -184,13 +203,16 @@ class TerminalEventParser {
             reason: 'terminal output without input pattern',
         };
     }
-    buildUpdate(event, status, debugReason) {
+    buildUpdate(event, status, debugReason, debugMatchedText) {
         const update = {
             id: event.id,
             status,
             occurredAt: event.occurredAt,
             debugReason,
         };
+        const trimmedMatchedText = debugMatchedText?.trim();
+        if (trimmedMatchedText)
+            update.debugMatchedText = trimmedMatchedText.slice(0, 500);
         if (event.exitCode !== undefined)
             update.exitCode = event.exitCode;
         if (event.exitReason !== undefined)
@@ -205,6 +227,9 @@ class TerminalEventParser {
             outputTail: '',
             awaitingInput: false,
             agentUiDetected: false,
+            lastAgentRunningIndicatorAt: 0,
+            lastStatusChangeAt: 0,
+            lastStatus: null,
             interactiveExecutionIds: new Set(),
             iconGatedExecutionIds: new Set(),
         };
@@ -215,6 +240,9 @@ class TerminalEventParser {
         state.outputTail = '';
         state.awaitingInput = false;
         state.agentUiDetected = false;
+        state.lastAgentRunningIndicatorAt = 0;
+        state.lastStatusChangeAt = 0;
+        state.lastStatus = null;
         state.interactiveExecutionIds.clear();
         state.iconGatedExecutionIds.clear();
     }
@@ -238,24 +266,26 @@ function isIconGatedAgentOutput(event, state) {
 function isAgentUiOutput(output) {
     return AGENT_UI_OUTPUT_PATTERNS.some(pattern => pattern.test(output));
 }
-function hasAgentRunningIndicator(output) {
-    return output.split(/\n/).some(isAgentRunningIndicatorLine);
+function getAgentRunningIndicatorLine(output) {
+    return output.split(/\n/).find(isAgentRunningIndicatorLine)?.trim() ?? '';
 }
 function isAgentRunningIndicatorLine(line) {
-    const runningIcon = line.match(/(?:^|\s)(?:[│┃]\s*)?([◎◉○●◦•])\s+\S/u);
-    if (!runningIcon)
+    return /(?:^|\s)(?:[│┃]\s*)?[◎◉○●◦•](?:\s+\S|\S|$)/u.test(line);
+}
+function getMatchingLine(output, pattern) {
+    return output.split(/\n/).find(line => pattern.test(line))?.trim() ?? '';
+}
+function isWithinAgentRunningGracePeriod(state, occurredAt) {
+    if (state.lastAgentRunningIndicatorAt <= 0)
         return false;
-    const icon = runningIcon[1] ?? '';
-    if (/^[◦•]$/u.test(icon)) {
-        return /\b(?:working|thinking|running|updating|validating|revalidating|testing|building|compiling|installing|searching|reading|writing|editing|reviewing|checking)\b/i.test(line) ||
-            /\b(?:esc|escape)\s+to\s+(?:cancel|interrupt)\b/i.test(line);
-    }
-    return true;
+    return occurredAt - state.lastAgentRunningIndicatorAt < AGENT_RUNNING_GRACE_PERIOD_MS;
 }
 function stripTerminalControlSequences(value) {
     return value
-        .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
-        .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '') // OSC sequences
+        .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '') // CSI sequences
+        .replace(/\x1B[PX^_].*?\x1B\\/g, '') // Other escape sequences
+        .replace(/[\x00-\x1F\x7F-\x9F]/g, '') // Remove non-printable characters
         .replace(/\r/g, '\n');
 }
 function normalizeCommandLine(commandLine) {

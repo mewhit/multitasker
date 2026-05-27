@@ -6,7 +6,7 @@ const electronPath = require('electron');
 
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.join(projectRoot, 'dist');
-const mainFile = path.join(distDir, 'main.js');
+const mainFile = path.join(distDir, 'desktop', 'main.js');
 const rendererFile = path.join(projectRoot, 'index.html');
 const restartDebounceMs = 500;
 const mainFileCheckMs = 250;
@@ -26,7 +26,7 @@ function log(message) {
 function waitForMainBuild() {
   if (fs.existsSync(mainFile)) return Promise.resolve();
 
-  log('waiting for dist\\main.js...');
+  log('waiting for dist\\desktop\\main.js...');
   return new Promise(resolve => {
     const timer = setInterval(() => {
       if (!fs.existsSync(mainFile)) return;

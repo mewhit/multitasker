@@ -2,12 +2,15 @@
   "name": "multitasker",
   "version": "1.0.0",
   "description": "Electron desktop app",
-  "main": "dist/main.js",
+  "main": "dist/desktop/main.js",
   "scripts": {
     "clean:debug-log": "node scripts\\clean-debug-log.js",
     "prebuild": "npm run clean:debug-log",
     "build": "tsc -p tsconfig.json",
     "postbuild": "npm run clean:debug-log",
+    "server": "node dist\\http-server\\server.js",
+    "apps:start": "npm run start",
+    "apps:dev": "npm run dev",
     "dev": "concurrently -k \"tsc -w -p tsconfig.json\" \"node scripts\\dev-electron.js\"",
     "start": "yarn build && electron ."
   },

@@ -40,6 +40,9 @@ interface TerminalParserState {
   outputTail: string;
   awaitingInput: boolean;
   agentUiDetected: boolean;
+  lastAgentRunningIndicatorAt: number;
+  lastStatusChangeAt: number;
+  lastStatus: SessionStatus | null;
   interactiveExecutionIds: Set<string>;
   iconGatedExecutionIds: Set<string>;
 }
@@ -47,9 +50,12 @@ interface TerminalParserState {
 interface TerminalOutputAnalysis {
   requestsInput: boolean;
   reason: string;
+  matchedText?: string;
 }
 
 const TERMINAL_OUTPUT_TAIL_LENGTH = 4000;
+const AGENT_RUNNING_GRACE_PERIOD_MS = 5000;
+const STATUS_CHANGE_STABILIZATION_MS = 500;
 const INTERACTIVE_AGENT_COMMAND_PATTERN = /(^|[\s"'`\\/])(?:copilot(?:-cli)?|claude(?:-code)?|codex|gemini)(?:\.cmd|\.exe)?(?:\s|$)/i;
 const ICON_GATED_AGENT_COMMAND_PATTERN = /(^|[\s"'`\\/])(?:copilot(?:-cli)?|codex)(?:\.cmd|\.exe)?(?:\s|$)/i;
 const INPUT_REQUEST_PATTERNS = [
@@ -98,7 +104,7 @@ export class TerminalEventParser {
       case 'shell_execution_started':
         return this.handleShellExecutionStarted(event, state);
       case 'terminal_output':
-        return this.handleTerminalOutput(event, state);
+        return this.handleTerminalOutput(event, state, currentStatus);
       case 'shell_execution_ended':
         return this.handleShellExecutionEnded(event, state);
       case 'terminal_closed':
@@ -152,17 +158,41 @@ export class TerminalEventParser {
     return this.buildUpdate(event, 'running', 'non-interactive shell execution started');
   }
 
-  private handleTerminalOutput(event: TerminalEvent, state: TerminalParserState): TerminalUpdate | null {
+  private handleTerminalOutput(
+    event: TerminalEvent,
+    state: TerminalParserState,
+    currentStatus: SessionStatus
+  ): TerminalUpdate | null {
     if (event.output === undefined || event.output.length === 0) return null;
 
-    const analysis = this.analyzeTerminalOutput(state, event.output, isIconGatedAgentOutput(event, state), event.captureState);
+    const analysis = this.analyzeTerminalOutput(
+      state,
+      event.output,
+      isIconGatedAgentOutput(event, state),
+      currentStatus,
+      event.occurredAt
+    );
+
+    const proposedStatus = analysis.requestsInput ? 'needs_attention' : 'running';
+    
+    // Stabilization: avoid status flapping - only change if enough time has passed or status is stable
+    const timeSinceLastChange = state.lastStatusChangeAt > 0 ? event.occurredAt - state.lastStatusChangeAt : Infinity;
+    if (state.lastStatus && state.lastStatus !== proposedStatus && timeSinceLastChange < STATUS_CHANGE_STABILIZATION_MS) {
+      // Keep previous status to avoid flapping
+      return this.buildUpdate(event, state.lastStatus, `${analysis.reason} (stabilized)`, analysis.matchedText);
+    }
+
     if (analysis.requestsInput) {
       state.awaitingInput = true;
-      return this.buildUpdate(event, 'needs_attention', analysis.reason);
+      state.lastStatus = 'needs_attention';
+      state.lastStatusChangeAt = event.occurredAt;
+      return this.buildUpdate(event, 'needs_attention', analysis.reason, analysis.matchedText);
     }
 
     state.awaitingInput = false;
-    return this.buildUpdate(event, 'running', analysis.reason);
+    state.lastStatus = 'running';
+    state.lastStatusChangeAt = event.occurredAt;
+    return this.buildUpdate(event, 'running', analysis.reason, analysis.matchedText);
   }
 
   private handleTerminalCaptureState(event: TerminalEvent, state: TerminalParserState): TerminalUpdate | null {
@@ -215,17 +245,21 @@ export class TerminalEventParser {
     state: TerminalParserState,
     output: string,
     iconGatedAgentOutput: boolean,
-    captureState: TerminalCaptureState | undefined
+    currentStatus: SessionStatus,
+    occurredAt: number
   ): TerminalOutputAnalysis {
     const normalizedOutput = stripTerminalControlSequences(output);
     const tail = appendTerminalOutputTail(state, normalizedOutput);
     const agentUiOutput = iconGatedAgentOutput || state.agentUiDetected || isAgentUiOutput(tail);
     if (agentUiOutput) {
       state.agentUiDetected = true;
-      if (hasAgentRunningIndicator(normalizedOutput)) {
+      const runningIndicatorLine = getAgentRunningIndicatorLine(normalizedOutput);
+      if (runningIndicatorLine) {
+        state.lastAgentRunningIndicatorAt = occurredAt;
         return {
           requestsInput: false,
           reason: 'matched agent running indicator',
+          matchedText: runningIndicatorLine,
         };
       }
 
@@ -234,13 +268,14 @@ export class TerminalEventParser {
         return {
           requestsInput: true,
           reason: `matched input pattern ${inputPattern.toString()}`,
+          matchedText: tail.trimEnd().split(/\n/).slice(-1)[0] ?? '',
         };
       }
 
-      if (captureState === 'capturing') {
+      if (currentStatus === 'running' && isWithinAgentRunningGracePeriod(state, occurredAt)) {
         return {
           requestsInput: false,
-          reason: 'terminal output capture active',
+          reason: `agent output without running indicator within ${AGENT_RUNNING_GRACE_PERIOD_MS}ms grace period`,
         };
       }
 
@@ -255,6 +290,7 @@ export class TerminalEventParser {
       return {
         requestsInput: false,
         reason: `matched running pattern ${runningPattern.toString()}`,
+        matchedText: getMatchingLine(normalizedOutput, runningPattern),
       };
     }
 
@@ -264,6 +300,7 @@ export class TerminalEventParser {
       return {
         requestsInput: true,
         reason: `matched input pattern ${inputPattern.toString()}`,
+        matchedText: trimmedTail.split(/\n/).slice(-1)[0] ?? '',
       };
     }
 
@@ -273,13 +310,20 @@ export class TerminalEventParser {
     };
   }
 
-  private buildUpdate(event: TerminalEvent, status: SessionStatus, debugReason: string): TerminalUpdate {
+  private buildUpdate(
+    event: TerminalEvent,
+    status: SessionStatus,
+    debugReason: string,
+    debugMatchedText?: string
+  ): TerminalUpdate {
     const update: TerminalUpdate = {
       id: event.id,
       status,
       occurredAt: event.occurredAt,
       debugReason,
     };
+    const trimmedMatchedText = debugMatchedText?.trim();
+    if (trimmedMatchedText) update.debugMatchedText = trimmedMatchedText.slice(0, 500);
     if (event.exitCode !== undefined) update.exitCode = event.exitCode;
     if (event.exitReason !== undefined) update.exitReason = event.exitReason;
     return update;
@@ -293,6 +337,9 @@ export class TerminalEventParser {
       outputTail: '',
       awaitingInput: false,
       agentUiDetected: false,
+      lastAgentRunningIndicatorAt: 0,
+      lastStatusChangeAt: 0,
+      lastStatus: null,
       interactiveExecutionIds: new Set<string>(),
       iconGatedExecutionIds: new Set<string>(),
     };
@@ -304,6 +351,9 @@ export class TerminalEventParser {
     state.outputTail = '';
     state.awaitingInput = false;
     state.agentUiDetected = false;
+    state.lastAgentRunningIndicatorAt = 0;
+    state.lastStatusChangeAt = 0;
+    state.lastStatus = null;
     state.interactiveExecutionIds.clear();
     state.iconGatedExecutionIds.clear();
   }
@@ -332,27 +382,29 @@ function isAgentUiOutput(output: string): boolean {
   return AGENT_UI_OUTPUT_PATTERNS.some(pattern => pattern.test(output));
 }
 
-function hasAgentRunningIndicator(output: string): boolean {
-  return output.split(/\n/).some(isAgentRunningIndicatorLine);
+function getAgentRunningIndicatorLine(output: string): string {
+  return output.split(/\n/).find(isAgentRunningIndicatorLine)?.trim() ?? '';
 }
 
 function isAgentRunningIndicatorLine(line: string): boolean {
-  const runningIcon = line.match(/(?:^|\s)(?:[│┃]\s*)?([◎◉○●◦•])\s+\S/u);
-  if (!runningIcon) return false;
+  return /(?:^|\s)(?:[│┃]\s*)?[◎◉○●◦•](?:\s+\S|\S|$)/u.test(line);
+}
 
-  const icon = runningIcon[1] ?? '';
-  if (/^[◦•]$/u.test(icon)) {
-    return /\b(?:working|thinking|running|updating|validating|revalidating|testing|building|compiling|installing|searching|reading|writing|editing|reviewing|checking)\b/i.test(line) ||
-      /\b(?:esc|escape)\s+to\s+(?:cancel|interrupt)\b/i.test(line);
-  }
+function getMatchingLine(output: string, pattern: RegExp): string {
+  return output.split(/\n/).find(line => pattern.test(line))?.trim() ?? '';
+}
 
-  return true;
+function isWithinAgentRunningGracePeriod(state: TerminalParserState, occurredAt: number): boolean {
+  if (state.lastAgentRunningIndicatorAt <= 0) return false;
+  return occurredAt - state.lastAgentRunningIndicatorAt < AGENT_RUNNING_GRACE_PERIOD_MS;
 }
 
 function stripTerminalControlSequences(value: string): string {
   return value
-    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '') // OSC sequences
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')       // CSI sequences
+    .replace(/\x1B[PX^_].*?\x1B\\/g, '')            // Other escape sequences
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, '')           // Remove non-printable characters
     .replace(/\r/g, '\n');
 }
 

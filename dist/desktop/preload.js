@@ -22,7 +22,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
         electron_1.ipcRenderer.on('manual-task:list-update', (_event, tasks) => cb(tasks));
     },
     getRecurringTasks: () => electron_1.ipcRenderer.invoke('recurring-task:list'),
-    addRecurringTask: (text, time, daysOfWeek) => electron_1.ipcRenderer.invoke('recurring-task:add', text, time, daysOfWeek),
+    addRecurringTask: (text, time, schedule) => electron_1.ipcRenderer.invoke('recurring-task:add', text, time, schedule),
     removeRecurringTask: (id) => electron_1.ipcRenderer.invoke('recurring-task:remove', id),
     onRecurringTaskListUpdate: (cb) => {
         electron_1.ipcRenderer.on('recurring-task:list-update', (_event, tasks) => cb(tasks));
@@ -45,6 +45,18 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     },
     onSlackListenerStatus: (cb) => {
         electron_1.ipcRenderer.on('slack:listener-status', (_event, payload) => cb(payload));
+    },
+    getGoogleCalendarEvents: () => electron_1.ipcRenderer.invoke('google-calendar:list'),
+    getGoogleCalendarStatus: () => electron_1.ipcRenderer.invoke('google-calendar:status'),
+    connectGoogleCalendar: () => electron_1.ipcRenderer.invoke('google-calendar:connect'),
+    disconnectGoogleCalendar: (id) => electron_1.ipcRenderer.invoke('google-calendar:disconnect', id),
+    refreshGoogleCalendar: () => electron_1.ipcRenderer.invoke('google-calendar:refresh'),
+    openGoogleCalendarEvent: (id) => electron_1.ipcRenderer.invoke('google-calendar:open', id),
+    onGoogleCalendarListUpdate: (cb) => {
+        electron_1.ipcRenderer.on('google-calendar:list-update', (_event, events) => cb(events));
+    },
+    onGoogleCalendarStatusUpdate: (cb) => {
+        electron_1.ipcRenderer.on('google-calendar:status-update', (_event, status) => cb(status));
     },
     getSettings: () => electron_1.ipcRenderer.invoke('settings:get'),
     setSettings: (settings) => electron_1.ipcRenderer.invoke('settings:set', settings),

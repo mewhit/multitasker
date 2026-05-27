@@ -18,6 +18,7 @@
         --red:      #f85149;
         --gray:     #484f58;
         --accent:   #58a6ff;
+        --calendar: #58a6ff;
         --slack:    #a371f7;
         --slack-strong: #d2a8ff;
         --sidebar-w: 280px;
@@ -159,6 +160,23 @@
       .manual-task-label { color: var(--yellow); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
       .manual-task-time { color: var(--text-dim); font-size: 11px; margin-left: auto; white-space: nowrap; }
       .manual-task-text { font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .calendar-card {
+        border: 1px solid rgba(88,166,255,0.52);
+        border-radius: 8px;
+        padding: 8px;
+        margin-bottom: 6px;
+        background: rgba(88,166,255,0.1);
+        box-shadow: inset 3px 0 0 var(--calendar);
+      }
+      .calendar-card:hover {
+        border-color: var(--calendar);
+        background: rgba(88,166,255,0.16);
+      }
+      .calendar-card-top { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+      .calendar-label { color: var(--calendar); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+      .calendar-time { color: var(--text-dim); font-size: 11px; margin-left: auto; white-space: nowrap; }
+      .calendar-title { font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .calendar-location { color: var(--text-dim); font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
       .session-card {
         border-radius: 8px;
         padding: 10px 10px 8px;
@@ -274,11 +292,13 @@
       .modal h2 { font-size: 16px; margin-bottom: 18px; }
       .form-group { margin-bottom: 14px; }
       .form-group label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 5px; }
-      .form-group input {
+      .form-group input,
+      .form-group select {
         width: 100%; background: var(--bg3); border: 1px solid var(--border);
         border-radius: 6px; padding: 7px 10px; color: var(--text); font-size: 13px; outline: none;
       }
-      .form-group input:focus { border-color: var(--accent); }
+      .form-group input:focus,
+      .form-group select:focus { border-color: var(--accent); }
       .form-group textarea {
         width: 100%; min-height: 90px; resize: vertical; background: var(--bg3); border: 1px solid var(--border);
         border-radius: 6px; padding: 7px 10px; color: var(--text); font: inherit; outline: none;
@@ -299,6 +319,37 @@
       .shell-btn.active { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600; }
       .form-row { display: flex; gap: 6px; }
       .form-row input { flex: 1; }
+      .form-help { color: var(--text-dim); font-size: 11px; line-height: 1.35; margin-top: 4px; }
+      .settings-section {
+        border-top: 1px solid var(--border);
+        margin-top: 14px;
+        padding-top: 14px;
+      }
+      .settings-section h3 { font-size: 12px; margin-bottom: 10px; color: var(--text); }
+      .integration-status {
+        color: var(--text-dim);
+        font-size: 11px;
+        line-height: 1.35;
+        min-height: 16px;
+      }
+      .integration-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .integration-list {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        max-height: 150px;
+        overflow-y: auto;
+      }
+      .integration-account {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .integration-account:last-child { border-bottom: 0; }
+      .integration-account-title { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+      .integration-account-detail { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
       .weekday-selector { display: flex; gap: 4px; flex-wrap: wrap; }
       .weekday-btn {
         background: var(--bg3);
@@ -360,13 +411,14 @@
           <div class="context-menu hidden" id="sidebar-add-menu">
             <button class="context-menu-item" id="btn-add-manual-task">Manual task</button>
             <button class="context-menu-item" id="btn-add-recurring-task">Recurring task</button>
+            <button class="context-menu-item" id="btn-add-google-calendar">Google Calendar</button>
             <button class="context-menu-item" id="btn-add-slack">Slack</button>
           </div>
         </div>
         <div id="session-list">
           <div id="empty-state">
             <div class="empty-icon">&#129302;</div>
-            <p>Nothing to do right now.<br>Sessions, manual tasks, and Slack notifications<br>will show up here.</p>
+            <p>Nothing to do right now.<br>Sessions, manual tasks, Calendar events,<br>and Slack notifications will show up here.</p>
           </div>
         </div>
         <div class="context-menu hidden" id="next-up-menu">
@@ -495,6 +547,15 @@
           <input id="input-recurring-task-time" type="time" value="08:00" />
         </div>
         <div class="form-group">
+          <label>Recurrence</label>
+          <select id="input-recurring-task-frequency">
+            <option value="weekly">Selected weekdays</option>
+            <option value="daily">Every day</option>
+            <option value="interval">Every X days</option>
+            <option value="monthly">Once per month</option>
+          </select>
+        </div>
+        <div class="form-group" id="recurring-weekday-group">
           <label>Days</label>
           <div class="weekday-selector" id="recurring-weekday-selector">
             <button class="weekday-btn" data-day="1">Mon</button>
@@ -505,6 +566,14 @@
             <button class="weekday-btn" data-day="6">Sat</button>
             <button class="weekday-btn" data-day="0">Sun</button>
           </div>
+        </div>
+        <div class="form-group hidden" id="recurring-interval-group">
+          <label>Repeat every N days</label>
+          <input id="input-recurring-task-interval-days" type="number" min="1" max="3650" step="1" value="2" />
+        </div>
+        <div class="form-group hidden" id="recurring-monthly-group">
+          <label>Day of month</label>
+          <input id="input-recurring-task-day-of-month" type="number" min="1" max="31" step="1" value="1" />
         </div>
         <div class="recurring-task-list" id="recurring-task-list"></div>
         <div class="modal-footer">
@@ -528,6 +597,55 @@
             <button class="shell-btn" data-shell="bash">Bash</button>
           </div>
         </div>
+        <div class="settings-section">
+          <h3>Google Calendar</h3>
+          <div class="form-group">
+            <label>OAuth client credentials</label>
+            <div class="form-help">Set MULTITASKER_GOOGLE_CALENDAR_CLIENT_ID and MULTITASKER_GOOGLE_CALENDAR_CLIENT_SECRET on the local backend. They are not stored in the Electron user settings.</div>
+          </div>
+          <div class="form-group">
+            <label>Calendar ID for new connections</label>
+            <input id="settings-google-calendar-id" type="text" placeholder="primary" />
+          </div>
+          <div class="form-group">
+            <label>Sync events for next N days</label>
+            <input id="settings-google-lookahead-days" type="number" min="1" max="365" step="1" value="7" />
+            <div class="form-help">Next up only shows today's Calendar events; events move to the top 5 minutes before start time.</div>
+          </div>
+          <div class="form-group">
+            <label><input id="settings-google-enabled" type="checkbox" /> Show Google Calendar events in Next up</label>
+          </div>
+          <div class="form-group">
+            <label><input id="settings-google-owned-only" type="checkbox" /> Only sync calendars I own</label>
+            <div class="form-help">Keeps shared calendars from other people out of Next up. Leave Calendar ID as primary for your main calendar.</div>
+          </div>
+          <div class="form-group integration-actions">
+            <button class="btn" id="btn-connect-google-calendar">Connect Google account</button>
+            <button class="btn" id="btn-refresh-google-calendar">Refresh</button>
+            <button class="btn" id="btn-disconnect-google-calendar">Disconnect all</button>
+          </div>
+          <div class="integration-status" id="google-calendar-status">Google Calendar is not connected.</div>
+          <div class="integration-list" id="google-calendar-account-list"></div>
+        </div>
+        <div class="settings-section">
+          <h3>GitHub Reviews</h3>
+          <div class="form-group">
+            <label><input id="settings-github-enabled" type="checkbox" /> Create tasks for pull requests that request my review</label>
+            <div class="form-help">Set MULTITASKER_GITHUB_TOKEN on the local backend environment.</div>
+          </div>
+          <div class="form-group">
+            <label>Repository owner</label>
+            <input id="settings-github-owner" type="text" placeholder="octo-org" />
+          </div>
+          <div class="form-group">
+            <label>Repository name</label>
+            <input id="settings-github-repo" type="text" placeholder="my-repo" />
+          </div>
+          <div class="form-group">
+            <label>Poll every N minutes</label>
+            <input id="settings-github-poll-minutes" type="number" min="1" max="60" step="1" value="5" />
+          </div>
+        </div>
         <div class="modal-footer">
           <button class="btn" id="btn-cancel-settings">Cancel</button>
           <button class="btn btn-primary" id="btn-save-settings">Save</button>
@@ -539,14 +657,18 @@
       const api = window.electronAPI;
       const NEXT_UP_ORDER_STORAGE_KEY = 'multitasker.nextUpOrder.v1';
       const NEXT_UP_DONE_STORAGE_KEY = 'multitasker.nextUpDone.v1';
+      const CALENDAR_TOP_WINDOW_MS = 5 * 60 * 1000;
       let sessions = [];
       let manualTasks = [];
       let recurringTasks = [];
       let slackNotifications = [];
+      let googleCalendarEvents = [];
+      let googleCalendarStatus = null;
       let slackListenerStatus = '';
       let nextUpOrder = loadNextUpOrder();
       let nextUpDone = new Set(loadNextUpDone());
       let nextUpContextKey = '';
+      let nextUpClockTimer = 0;
       let draggedNextUpKey = '';
       let suppressNextUpClick = false;
       let activeId = null;
@@ -554,6 +676,7 @@
       let renameSessionId = null;
       let pendingSessionList = null;
       let renderFrameId = 0;
+      let renderFallbackTimer = 0;
 
       function loadNextUpOrder() {
         try {
@@ -642,6 +765,17 @@
           if (status) applySlackListenerStatus(status.ok, status.message, false);
         });
       }
+      if (api.getGoogleCalendarEvents) {
+        api.getGoogleCalendarEvents().then(list => {
+          googleCalendarEvents = list;
+          renderGoogleCalendarEvents();
+        });
+      }
+      if (api.getGoogleCalendarStatus) {
+        api.getGoogleCalendarStatus().then(status => {
+          applyGoogleCalendarStatus(status);
+        });
+      }
       if (api.onSlackNotification) {
         api.onSlackNotification(notification => {
           slackNotifications = [notification, ...slackNotifications.filter(existing => existing.id !== notification.id)].slice(0, 100);
@@ -664,6 +798,17 @@
           applySlackListenerStatus(ok, message, true);
         });
       }
+      if (api.onGoogleCalendarListUpdate) {
+        api.onGoogleCalendarListUpdate(list => {
+          googleCalendarEvents = list;
+          renderGoogleCalendarEvents();
+        });
+      }
+      if (api.onGoogleCalendarStatusUpdate) {
+        api.onGoogleCalendarStatusUpdate(status => {
+          applyGoogleCalendarStatus(status);
+        });
+      }
       if (api.onVsCodeFocusFailed) {
         api.onVsCodeFocusFailed(({ id, message }) => {
           if (id === activeId) setDetailNotice(message);
@@ -676,72 +821,152 @@
 
       function scheduleListRender(list) {
         pendingSessionList = list;
-        if (renderFrameId) return;
-        renderFrameId = requestAnimationFrame(() => {
+        if (renderFrameId || renderFallbackTimer) return;
+        renderFrameId = requestAnimationFrame(flushScheduledListRender);
+        renderFallbackTimer = window.setTimeout(flushScheduledListRender, 100);
+      }
+
+      function flushScheduledListRender() {
+        if (renderFrameId) {
+          cancelAnimationFrame(renderFrameId);
           renderFrameId = 0;
-          const nextList = pendingSessionList;
-          pendingSessionList = null;
-          if (!nextList) return;
-          renderSidebar(nextList);
-          if (activeId && nextList.some(s => s.id === activeId)) refreshDetail(activeId);
-          else if (activeId) clearDetail();
-        });
+        }
+        if (renderFallbackTimer) {
+          clearTimeout(renderFallbackTimer);
+          renderFallbackTimer = 0;
+        }
+        const nextList = pendingSessionList;
+        pendingSessionList = null;
+        if (!nextList) return;
+        renderSidebar(nextList);
+        if (activeId && nextList.some(s => s.id === activeId)) refreshDetail(activeId);
+        else if (activeId) clearDetail();
       }
 
       function renderSidebar(list) {
         const container = document.getElementById('session-list');
         const empty = document.getElementById('empty-state');
         const items = nextUpItems(list);
-        container.querySelectorAll('.session-card, .manual-task-card, .slack-card').forEach(el => el.remove());
+        const existingCards = new Map(
+          [...container.querySelectorAll('.next-up-card')]
+            .map(card => [card.dataset.nextUpKey || '', card])
+            .filter(([key]) => key)
+        );
+        const renderedKeys = new Set();
         updateSessionCount(items.length);
 
         if (items.length === 0) {
+          existingCards.forEach(card => card.remove());
           empty.style.display = '';
           clearDetail();
+          scheduleNextUpClockRefresh();
           return;
         }
 
         empty.style.display = 'none';
         items.forEach(item => {
-          const card = item.kind === 'session'
-            ? createCard(item.session)
-            : item.kind === 'manual'
-              ? createManualTaskCard(item.task)
-              : createSlackCard(item.notification);
-          prepareNextUpCard(card, nextUpItemKey(item));
+          const key = nextUpItemKey(item);
+          let card = existingCards.get(key);
+          if (card) {
+            updateNextUpCard(card, item);
+          } else {
+            if (item.kind === 'session') card = createCard(item.session);
+            else if (item.kind === 'manual') card = createManualTaskCard(item.task);
+            else if (item.kind === 'calendar') card = createGoogleCalendarCard(item.event);
+            else card = createSlackCard(item.notification);
+            prepareNextUpCard(card, key);
+          }
+          renderedKeys.add(key);
           if (item.kind === 'session') card.classList.toggle('active', item.session.id === activeId);
           container.appendChild(card);
         });
+        existingCards.forEach((card, key) => {
+          if (!renderedKeys.has(key)) card.remove();
+        });
+        scheduleNextUpClockRefresh();
       }
 
       function nextUpItems(list) {
-        syncNextUpDone(list.map(sessionDoneKey));
+        const nowMs = Date.now();
+        const visibleCalendarEvents = googleCalendarEvents.filter(event => isCalendarEventVisibleToday(event, nowMs));
+        syncNextUpDone([
+          ...list.map(sessionDoneKey),
+          ...visibleCalendarEvents.map(calendarDoneKey),
+        ]);
         const items = [
           ...list.map(session => ({ kind: 'session', session, priority: sessionPriority(session), time: session.lastActivity || 0 })),
           ...manualTasks.map(task => ({ kind: 'manual', task, priority: 2.5, time: task.createdAt || 0 })),
+          ...visibleCalendarEvents.map(event => ({ kind: 'calendar', event, priority: calendarEventPriority(event, nowMs), time: event.startMs || 0 })),
           ...slackNotifications.map(notification => ({ kind: 'slack', notification, priority: slackNotificationPriority(notification), time: notification.receivedAt || 0 })),
         ].filter(item => !isNextUpDone(item));
         const defaultOrderedItems = items.sort((a, b) => {
           if (a.priority !== b.priority) return a.priority - b.priority;
+          if (a.kind === 'calendar' && b.kind === 'calendar') return a.time - b.time;
+          if (a.kind === 'slack' && b.kind === 'slack') return a.time - b.time;
           return b.time - a.time;
         });
         syncNextUpOrder(defaultOrderedItems.map(nextUpItemKey));
         const orderIndex = new Map(nextUpOrder.map((key, index) => [key, index]));
         return defaultOrderedItems.sort((a, b) => {
-          const bottomGroupDiff = nextUpBottomGroup(a) - nextUpBottomGroup(b);
-          if (bottomGroupDiff !== 0) return bottomGroupDiff;
+          const displayGroupDiff = nextUpDisplayGroup(a, nowMs) - nextUpDisplayGroup(b, nowMs);
+          if (displayGroupDiff !== 0) return displayGroupDiff;
+          if (a.kind === 'calendar' && b.kind === 'calendar') return a.time - b.time;
           return (orderIndex.get(nextUpItemKey(a)) ?? Number.MAX_SAFE_INTEGER) -
             (orderIndex.get(nextUpItemKey(b)) ?? Number.MAX_SAFE_INTEGER);
         });
       }
 
-      function nextUpBottomGroup(item) {
-        return item.kind === 'session' && normalizeStatus(item.session.status) === 'running' ? 1 : 0;
+      function nextUpDisplayGroup(item, nowMs = Date.now()) {
+        if (item.kind === 'calendar' && isCalendarEventUrgent(item.event, nowMs)) return 0;
+        if (item.kind === 'calendar') return 2;
+        if (item.kind === 'session' && normalizeStatus(item.session.status) === 'running') return 3;
+        return 1;
+      }
+
+      function calendarEventPriority(event, nowMs = Date.now()) {
+        return isCalendarEventUrgent(event, nowMs) ? -1 : 4.5;
+      }
+
+      function isCalendarEventVisibleToday(event, nowMs = Date.now()) {
+        const startMs = getCalendarEventTimeMs(event, 'startMs', 'start');
+        const endMs = getCalendarEventTimeMs(event, 'endMs', 'end');
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < nowMs) return false;
+        const todayStartMs = startOfLocalDayMs(nowMs);
+        const tomorrowStartMs = startOfNextLocalDayMs(nowMs);
+        return startMs < tomorrowStartMs && endMs > todayStartMs;
+      }
+
+      function isCalendarEventUrgent(event, nowMs = Date.now()) {
+        if (event.allDay) return false;
+        const startMs = getCalendarEventTimeMs(event, 'startMs', 'start');
+        const endMs = getCalendarEventTimeMs(event, 'endMs', 'end');
+        return Number.isFinite(startMs) &&
+          Number.isFinite(endMs) &&
+          endMs >= nowMs &&
+          nowMs >= startMs - CALENDAR_TOP_WINDOW_MS;
+      }
+
+      function getCalendarEventTimeMs(event, msKey, fallbackKey) {
+        const msValue = Number(event[msKey]);
+        if (Number.isFinite(msValue)) return msValue;
+        const parsed = Date.parse(event[fallbackKey] || '');
+        return Number.isFinite(parsed) ? parsed : NaN;
+      }
+
+      function startOfLocalDayMs(ms) {
+        const date = new Date(ms);
+        return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+      }
+
+      function startOfNextLocalDayMs(ms) {
+        const date = new Date(ms);
+        return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
       }
 
       function nextUpItemKey(item) {
         if (item.kind === 'session') return 'session:' + item.session.id;
         if (item.kind === 'manual') return 'manual:' + item.task.id;
+        if (item.kind === 'calendar') return 'calendar:' + item.event.id;
         return 'slack:' + item.notification.id;
       }
 
@@ -749,14 +974,20 @@
         return 'session:' + session.id + ':' + normalizeStatus(session.status) + ':' + (session.lastActivity || 0);
       }
 
+      function calendarDoneKey(event) {
+        return 'calendar:' + event.id + ':' + (event.updated || event.start || event.startMs || 0);
+      }
+
       function isNextUpDone(item) {
-        return item.kind === 'session' && nextUpDone.has(sessionDoneKey(item.session));
+        if (item.kind === 'session') return nextUpDone.has(sessionDoneKey(item.session));
+        if (item.kind === 'calendar') return nextUpDone.has(calendarDoneKey(item.event));
+        return false;
       }
 
       function syncNextUpOrder(availableKeys) {
         const available = new Set(availableKeys);
         const defaultIndex = new Map(availableKeys.map((key, index) => [key, index]));
-        const nextOrder = nextUpOrder.filter(key => available.has(key));
+        let nextOrder = nextUpOrder.filter(key => available.has(key));
         const present = new Set(nextOrder);
         availableKeys.forEach(key => {
           if (present.has(key)) return;
@@ -766,9 +997,20 @@
           else nextOrder.splice(insertAt, 0, key);
           present.add(key);
         });
+        nextOrder = normalizeSlackNextUpOrder(nextOrder, defaultIndex);
         if (nextOrder.length === nextUpOrder.length && nextOrder.every((key, index) => key === nextUpOrder[index])) return;
         nextUpOrder = nextOrder;
         saveNextUpOrder();
+      }
+
+      function normalizeSlackNextUpOrder(order, defaultIndex) {
+        const sortedSlackKeys = order
+          .filter(key => key.startsWith('slack:'))
+          .sort((a, b) => (defaultIndex.get(a) ?? Number.MAX_SAFE_INTEGER) - (defaultIndex.get(b) ?? Number.MAX_SAFE_INTEGER));
+        if (sortedSlackKeys.length < 2) return order;
+
+        let slackIndex = 0;
+        return order.map(key => key.startsWith('slack:') ? sortedSlackKeys[slackIndex++] : key);
       }
 
       function syncNextUpDone(availableDoneKeys) {
@@ -840,10 +1082,62 @@
         return card;
       }
 
+      function createGoogleCalendarCard(event) {
+        const card = document.createElement('div');
+        card.className = 'calendar-card';
+        card.dataset.eventId = event.id;
+        card.innerHTML = googleCalendarEventHTML(event);
+        card.title = event.htmlLink ? 'Open in Google Calendar' : 'Right-click for event options';
+        card.addEventListener('click', () => {
+          if (suppressNextUpClick) {
+            suppressNextUpClick = false;
+            return;
+          }
+          openGoogleCalendarEvent(event.id);
+        });
+        return card;
+      }
+
+      function updateNextUpCard(card, item) {
+        if (item.kind === 'session') {
+          card.dataset.id = item.session.id;
+          updateCardHtml(card, cardHTML(item.session));
+          return;
+        }
+
+        if (item.kind === 'manual') {
+          card.dataset.taskId = item.task.id;
+          card.title = 'Right-click for task options';
+          updateCardHtml(card, manualTaskHTML(item.task));
+          return;
+        }
+
+        if (item.kind === 'calendar') {
+          card.dataset.eventId = item.event.id;
+          card.title = item.event.htmlLink ? 'Open in Google Calendar' : 'Right-click for event options';
+          updateCardHtml(card, googleCalendarEventHTML(item.event));
+          return;
+        }
+
+        card.dataset.notificationId = item.notification.id;
+        card.title = 'Open in Slack';
+        updateCardHtml(card, slackNotificationHTML(item.notification));
+      }
+
+      function updateCardHtml(card, html) {
+        if (card.innerHTML !== html) card.innerHTML = html;
+      }
+
       async function openSlackNotification(id) {
         if (!api.openSlackNotification) return;
         const opened = await api.openSlackNotification(id);
         if (!opened) alert('Could not open this Slack notification.');
+      }
+
+      async function openGoogleCalendarEvent(id) {
+        if (!api.openGoogleCalendarEvent) return;
+        const opened = await api.openGoogleCalendarEvent(id);
+        if (!opened) alert('Could not open this Google Calendar event.');
       }
 
       function prepareNextUpCard(card, key) {
@@ -947,6 +1241,16 @@
           return;
         }
 
+        if (key.startsWith('calendar:')) {
+          const eventId = key.slice('calendar:'.length);
+          const event = googleCalendarEvents.find(candidate => candidate.id === eventId);
+          if (!event) return;
+          nextUpDone.add(calendarDoneKey(event));
+          saveNextUpDone();
+          renderNextUp();
+          return;
+        }
+
         if (key.startsWith('session:')) {
           const sessionId = key.slice('session:'.length);
           const session = sessions.find(candidate => candidate.id === sessionId);
@@ -1000,6 +1304,14 @@
           '<div class="manual-task-text">' + esc(task.text) + '</div>';
       }
 
+      function googleCalendarEventHTML(event) {
+        const when = event.allDay ? formatCalendarDate(event.startMs) : formatCalendarTimeRange(event);
+        const details = [event.accountEmail || event.accountName || '', event.location || ''].filter(Boolean).join(' · ');
+        return '<div class="calendar-card-top"><span class="calendar-label">Calendar</span><span class="calendar-time">' + esc(when) + '</span></div>' +
+          '<div class="calendar-title">' + esc(event.summary || '(no title)') + '</div>' +
+          (details ? '<div class="calendar-location">' + esc(details) + '</div>' : '');
+      }
+
       function updateSessionCount(countValue) {
         const el = document.getElementById('session-count');
         if (countValue > 0) {
@@ -1015,13 +1327,174 @@
         renderSidebar(sessions);
       }
 
+      function scheduleNextUpClockRefresh() {
+        if (nextUpClockTimer) {
+          clearTimeout(nextUpClockTimer);
+          nextUpClockTimer = 0;
+        }
+        const nowMs = Date.now();
+        const thresholdTimes = [startOfNextLocalDayMs(nowMs)];
+        googleCalendarEvents.forEach(event => {
+          const startMs = getCalendarEventTimeMs(event, 'startMs', 'start');
+          const endMs = getCalendarEventTimeMs(event, 'endMs', 'end');
+          if (Number.isFinite(startMs)) thresholdTimes.push(startMs - CALENDAR_TOP_WINDOW_MS, startMs);
+          if (Number.isFinite(endMs)) thresholdTimes.push(endMs);
+        });
+        const nextThresholdMs = Math.min(
+          ...thresholdTimes.filter(time => Number.isFinite(time) && time > nowMs)
+        );
+        const maxDelayMs = 60 * 60 * 1000;
+        const delayMs = Number.isFinite(nextThresholdMs)
+          ? Math.min(Math.max(nextThresholdMs - nowMs, 1000), maxDelayMs)
+          : maxDelayMs;
+        nextUpClockTimer = window.setTimeout(() => {
+          nextUpClockTimer = 0;
+          renderNextUp();
+        }, delayMs);
+      }
+
       function renderSlackNotifications() {
+        renderNextUp();
+      }
+
+      function renderGoogleCalendarEvents() {
         renderNextUp();
       }
 
       function applySlackListenerStatus(ok, message, notifyOnError) {
         slackListenerStatus = message || '';
         if (!ok && notifyOnError) alert(message);
+      }
+
+      function applyGoogleCalendarStatus(status) {
+        googleCalendarStatus = status;
+        const statusEl = document.getElementById('google-calendar-status');
+        if (statusEl) {
+          const syncText = status && status.lastSyncedAt ? ' Last sync ' + formatSlackTime(status.lastSyncedAt) + '.' : '';
+          statusEl.textContent = status ? (status.message || '') + syncText : 'Google Calendar is not connected.';
+        }
+        const connectButton = document.getElementById('btn-connect-google-calendar');
+        const disconnectButton = document.getElementById('btn-disconnect-google-calendar');
+        const refreshButton = document.getElementById('btn-refresh-google-calendar');
+        if (connectButton && status) connectButton.textContent = status.connected ? 'Connect another Google account' : 'Connect Google account';
+        if (disconnectButton && status) disconnectButton.disabled = !status.connected;
+        if (refreshButton && status) refreshButton.disabled = !status.connected || !status.enabled;
+        renderGoogleCalendarAccounts(status ? status.connections || [] : []);
+      }
+
+      function renderGoogleCalendarAccounts(connections) {
+        const container = document.getElementById('google-calendar-account-list');
+        if (!container) return;
+        if (!connections.length) {
+          container.innerHTML = '<div class="integration-account-detail" style="padding:8px;">No Google accounts connected.</div>';
+          return;
+        }
+        container.innerHTML = connections.map(connection => {
+          const title = connection.accountEmail || connection.accountName || connection.id;
+          const synced = connection.lastSyncedAt ? ' · synced ' + formatSlackTime(connection.lastSyncedAt) : '';
+          return '<div class="integration-account" data-id="' + esc(connection.id) + '">' +
+            '<div><div class="integration-account-title">' + esc(title) + '</div>' +
+            '<div class="integration-account-detail">' + esc(connection.calendarId || 'primary') + ' · ' + esc(String(connection.lookAheadDays || 7)) + ' days' + synced + '</div></div>' +
+            '<button class="btn-xs remove btn-disconnect-google-account" title="Disconnect this account">Disconnect</button>' +
+          '</div>';
+        }).join('');
+        container.querySelectorAll('.btn-disconnect-google-account').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const item = btn.closest('.integration-account');
+            const id = item ? item.dataset.id : '';
+            if (id) disconnectGoogleCalendar(id);
+          });
+        });
+      }
+
+      async function saveSettingsFromModal() {
+        const reviewTool = document.getElementById('settings-review-tool').value.trim();
+        const activeShellBtn = document.querySelector('#settings-shell-selector .shell-btn.active');
+        const defaultShell = activeShellBtn ? activeShellBtn.dataset.shell : 'powershell';
+        const googleCalendar = getGoogleCalendarSettingsInput();
+        const githubReview = getGitHubReviewSettingsInput();
+        if (!googleCalendar.ok) {
+          alert(googleCalendar.message);
+          return null;
+        }
+        if (!githubReview.ok) {
+          alert(githubReview.message);
+          return null;
+        }
+        await api.setSettings({
+          reviewTool: reviewTool || 'code {path}',
+          defaultShell,
+          googleCalendar: googleCalendar.value,
+          githubReview: githubReview.value,
+        });
+        return googleCalendar.value;
+      }
+
+      function getGoogleCalendarSettingsInput() {
+        const calendarId = document.getElementById('settings-google-calendar-id').value.trim() || 'primary';
+        const lookAheadDays = Number(document.getElementById('settings-google-lookahead-days').value);
+        const enabled = document.getElementById('settings-google-enabled').checked;
+        const ownedCalendarsOnly = document.getElementById('settings-google-owned-only').checked;
+        if (!Number.isInteger(lookAheadDays) || lookAheadDays < 1 || lookAheadDays > 365) {
+          return { ok: false, message: 'Google Calendar lookahead must be between 1 and 365 days.' };
+        }
+        const value = { calendarId, lookAheadDays, enabled, ownedCalendarsOnly };
+        return { ok: true, value };
+      }
+
+      function getGitHubReviewSettingsInput() {
+        const enabled = document.getElementById('settings-github-enabled').checked;
+        const owner = document.getElementById('settings-github-owner').value.trim();
+        const repo = document.getElementById('settings-github-repo').value.trim();
+        const pollMinutes = Number(document.getElementById('settings-github-poll-minutes').value);
+        if (!Number.isInteger(pollMinutes) || pollMinutes < 1 || pollMinutes > 60) {
+          return { ok: false, message: 'GitHub poll interval must be between 1 and 60 minutes.' };
+        }
+        if (enabled && (!owner || !repo)) {
+          return { ok: false, message: 'GitHub owner and repo are required when GitHub review tasks are enabled.' };
+        }
+        return { ok: true, value: { enabled, owner, repo, pollMinutes } };
+      }
+
+      async function connectGoogleCalendar() {
+        const saved = await saveSettingsFromModal();
+        if (!saved) return;
+        if (!api.connectGoogleCalendar) {
+          alert('Google Calendar is not available in this build.');
+          return;
+        }
+        applyGoogleCalendarStatus({
+          ...(googleCalendarStatus || {}),
+          message: 'Opening Google authorization...',
+          connected: Boolean(googleCalendarStatus && googleCalendarStatus.connected),
+          configured: Boolean(googleCalendarStatus && googleCalendarStatus.configured),
+          enabled: saved.enabled,
+          calendarId: saved.calendarId,
+          lookAheadDays: saved.lookAheadDays,
+          ownedCalendarsOnly: saved.ownedCalendarsOnly,
+          accountCount: googleCalendarStatus && googleCalendarStatus.accountCount ? googleCalendarStatus.accountCount : 0,
+          eventCount: googleCalendarEvents.length,
+          connections: googleCalendarStatus && googleCalendarStatus.connections ? googleCalendarStatus.connections : [],
+        });
+        const result = await api.connectGoogleCalendar();
+        if (result && result.status) applyGoogleCalendarStatus(result.status);
+        if (result && !result.ok) alert(result.message || 'Could not connect Google Calendar.');
+      }
+
+      async function refreshGoogleCalendar() {
+        const saved = await saveSettingsFromModal();
+        if (!saved || !api.refreshGoogleCalendar) return;
+        const status = await api.refreshGoogleCalendar();
+        applyGoogleCalendarStatus(status);
+      }
+
+      async function disconnectGoogleCalendar(id) {
+        if (!api.disconnectGoogleCalendar) return;
+        const status = await api.disconnectGoogleCalendar(id);
+        if (!id) googleCalendarEvents = [];
+        else googleCalendarEvents = googleCalendarEvents.filter(event => event.connectionId !== id);
+        renderGoogleCalendarEvents();
+        applyGoogleCalendarStatus(status);
       }
 
       function slackNotificationHTML(notification) {
@@ -1062,6 +1535,23 @@
         const date = new Date(value);
         if (!Number.isFinite(date.getTime())) return '';
         return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+
+      function formatCalendarDate(value) {
+        const date = new Date(value);
+        if (!Number.isFinite(date.getTime())) return '';
+        return date.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+      }
+
+      function formatCalendarTimeRange(event) {
+        const start = new Date(event.startMs);
+        const end = new Date(event.endMs);
+        if (!Number.isFinite(start.getTime())) return '';
+        const dateLabel = start.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+        const startTime = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (!Number.isFinite(end.getTime())) return dateLabel + ' ' + startTime;
+        const endTime = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return dateLabel + ' ' + startTime + '-' + endTime;
       }
 
       function activateSession(id) {
@@ -1218,7 +1708,11 @@
         closeSidebarAddMenu();
         document.getElementById('input-recurring-task-text').value = '';
         document.getElementById('input-recurring-task-time').value = '08:00';
+        document.getElementById('input-recurring-task-frequency').value = 'weekly';
+        document.getElementById('input-recurring-task-interval-days').value = '2';
+        document.getElementById('input-recurring-task-day-of-month').value = String(new Date().getDate());
         setRecurringWeekdays([1, 2, 3, 4, 5]);
+        updateRecurringFrequencyFields();
         renderRecurringTaskList();
         document.getElementById('recurring-task-modal').classList.remove('hidden');
         setTimeout(() => document.getElementById('input-recurring-task-text').focus(), 50);
@@ -1231,7 +1725,7 @@
       async function confirmRecurringTask() {
         const text = document.getElementById('input-recurring-task-text').value.trim();
         const time = document.getElementById('input-recurring-task-time').value.trim();
-        const daysOfWeek = getSelectedRecurringWeekdays();
+        const schedule = getRecurringScheduleInput();
         if (!text) {
           alert('Task text is required.');
           return;
@@ -1240,8 +1734,8 @@
           alert('Valid time is required.');
           return;
         }
-        if (daysOfWeek.length === 0) {
-          alert('Select at least one day.');
+        if (!schedule.ok) {
+          alert(schedule.message);
           return;
         }
         if (!api.addRecurringTask) {
@@ -1249,7 +1743,7 @@
           return;
         }
 
-        const task = await api.addRecurringTask(text, time, daysOfWeek);
+        const task = await api.addRecurringTask(text, time, schedule.value);
         if (!task) {
           alert('Could not add this recurring task.');
           return;
@@ -1258,6 +1752,40 @@
         recurringTasks = [task, ...recurringTasks.filter(existing => existing.id !== task.id)];
         document.getElementById('input-recurring-task-text').value = '';
         renderRecurringTaskList();
+      }
+
+      function getRecurringScheduleInput() {
+        const frequency = document.getElementById('input-recurring-task-frequency').value;
+        if (frequency === 'daily') return { ok: true, value: { frequency: 'daily' } };
+
+        if (frequency === 'interval') {
+          const intervalDays = Number(document.getElementById('input-recurring-task-interval-days').value);
+          if (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 3650) {
+            return { ok: false, message: 'Enter a repeat interval between 1 and 3650 days.' };
+          }
+          return { ok: true, value: { frequency: 'interval', intervalDays } };
+        }
+
+        if (frequency === 'monthly') {
+          const dayOfMonth = Number(document.getElementById('input-recurring-task-day-of-month').value);
+          if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) {
+            return { ok: false, message: 'Enter a day of month between 1 and 31.' };
+          }
+          return { ok: true, value: { frequency: 'monthly', dayOfMonth } };
+        }
+
+        const daysOfWeek = getSelectedRecurringWeekdays();
+        if (daysOfWeek.length === 0) {
+          return { ok: false, message: 'Select at least one day.' };
+        }
+        return { ok: true, value: { frequency: 'weekly', daysOfWeek } };
+      }
+
+      function updateRecurringFrequencyFields() {
+        const frequency = document.getElementById('input-recurring-task-frequency').value;
+        document.getElementById('recurring-weekday-group').classList.toggle('hidden', frequency !== 'weekly');
+        document.getElementById('recurring-interval-group').classList.toggle('hidden', frequency !== 'interval');
+        document.getElementById('recurring-monthly-group').classList.toggle('hidden', frequency !== 'monthly');
       }
 
       function setRecurringWeekdays(days) {
@@ -1304,7 +1832,18 @@
       }
 
       function formatRecurringSchedule(task) {
-        return 'Every ' + formatRecurringTime(task.time) + ' | ' + formatRecurringDays(task.daysOfWeek || []);
+        const time = formatRecurringTime(task.time);
+        const frequency = task.frequency || 'weekly';
+        if (frequency === 'daily') return 'Every day at ' + time;
+        if (frequency === 'interval') {
+          const intervalDays = Number.isInteger(task.intervalDays) ? task.intervalDays : 1;
+          return 'Every ' + intervalDays + ' day' + (intervalDays === 1 ? '' : 's') + ' at ' + time;
+        }
+        if (frequency === 'monthly') {
+          const day = Number.isInteger(task.dayOfMonth) ? task.dayOfMonth : 1;
+          return 'Monthly on day ' + day + (day > 28 ? ' (or last day)' : '') + ' at ' + time;
+        }
+        return formatRecurringDays(task.daysOfWeek || []) + ' at ' + time;
       }
 
       function formatRecurringTime(time) {
@@ -1423,6 +1962,10 @@
       });
       document.getElementById('btn-add-manual-task').addEventListener('click', showManualTaskModal);
       document.getElementById('btn-add-recurring-task').addEventListener('click', showRecurringTaskModal);
+      document.getElementById('btn-add-google-calendar').addEventListener('click', () => {
+        closeSidebarAddMenu();
+        document.getElementById('btn-settings').click();
+      });
       document.getElementById('btn-add-slack').addEventListener('click', startSlackAuth);
       document.getElementById('btn-cancel-manual-task').addEventListener('click', closeManualTaskModal);
       document.getElementById('btn-confirm-manual-task').addEventListener('click', confirmManualTask);
@@ -1435,6 +1978,7 @@
       document.querySelectorAll('#recurring-weekday-selector .weekday-btn').forEach(btn => {
         btn.addEventListener('click', () => btn.classList.toggle('active'));
       });
+      document.getElementById('input-recurring-task-frequency').addEventListener('change', updateRecurringFrequencyFields);
       document.getElementById('input-recurring-task-text').addEventListener('keydown', e => {
         if (e.key === 'Escape') closeRecurringTaskModal();
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) confirmRecurringTask();
@@ -1506,18 +2050,29 @@
         const s = await api.getSettings();
         document.getElementById('settings-review-tool').value = s.reviewTool;
         setShellSelector('settings-shell-selector', s.defaultShell || 'powershell');
+        const googleSettings = s.googleCalendar || {};
+        document.getElementById('settings-google-calendar-id').value = googleSettings.calendarId || 'primary';
+        document.getElementById('settings-google-lookahead-days').value = String(googleSettings.lookAheadDays || 7);
+        document.getElementById('settings-google-enabled').checked = googleSettings.enabled === true;
+        document.getElementById('settings-google-owned-only').checked = googleSettings.ownedCalendarsOnly !== false;
+        const githubSettings = s.githubReview || {};
+        document.getElementById('settings-github-enabled').checked = githubSettings.enabled === true;
+        document.getElementById('settings-github-owner').value = githubSettings.owner || '';
+        document.getElementById('settings-github-repo').value = githubSettings.repo || '';
+        document.getElementById('settings-github-poll-minutes').value = String(githubSettings.pollMinutes || 5);
+        if (api.getGoogleCalendarStatus) applyGoogleCalendarStatus(await api.getGoogleCalendarStatus());
         document.getElementById('settings-modal').classList.remove('hidden');
       });
       document.getElementById('btn-cancel-settings').addEventListener('click', () => {
         document.getElementById('settings-modal').classList.add('hidden');
       });
       document.getElementById('btn-save-settings').addEventListener('click', async () => {
-        const reviewTool = document.getElementById('settings-review-tool').value.trim();
-        const activeShellBtn = document.querySelector('#settings-shell-selector .shell-btn.active');
-        const defaultShell = activeShellBtn ? activeShellBtn.dataset.shell : 'powershell';
-        await api.setSettings({ reviewTool: reviewTool || 'code {path}', defaultShell });
-        document.getElementById('settings-modal').classList.add('hidden');
+        const saved = await saveSettingsFromModal();
+        if (saved) document.getElementById('settings-modal').classList.add('hidden');
       });
+      document.getElementById('btn-connect-google-calendar').addEventListener('click', connectGoogleCalendar);
+      document.getElementById('btn-refresh-google-calendar').addEventListener('click', refreshGoogleCalendar);
+      document.getElementById('btn-disconnect-google-calendar').addEventListener('click', () => disconnectGoogleCalendar());
 
       document.querySelectorAll('.modal-overlay').forEach(overlay => {
         overlay.addEventListener('click', e => {

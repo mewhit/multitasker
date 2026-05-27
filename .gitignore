@@ -1,5 +1,7 @@
 node_modules/
 debug-log/
+.env
+.env.local
 .multitasker-terminal-debug*.log
 .DS_Store
 Thumbs.db

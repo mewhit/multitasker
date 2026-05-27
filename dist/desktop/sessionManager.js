@@ -107,14 +107,17 @@ class SessionManager extends node_events_1.EventEmitter {
         return this.applyTerminalUpdate(entry, update);
     }
     updateTerminalEvent(event) {
+        return this.updateTerminalEventWithDetails(event)?.session ?? null;
+    }
+    updateTerminalEventWithDetails(event) {
         const entry = this.sessions.get(event.id);
         if (!entry)
             return null;
         if (entry.session.status === 'detached' && !this.restoreDetachedSessionFromTerminalEvent(entry, event)) {
-            return { ...entry.session };
+            return { session: { ...entry.session } };
         }
         if (event.occurredAt < entry.lastTerminalUpdateAt)
-            return { ...entry.session };
+            return { session: { ...entry.session } };
         const terminalBinding = {};
         if (event.windowId)
             terminalBinding.vscodeWindowId = event.windowId;
@@ -132,12 +135,12 @@ class SessionManager extends node_events_1.EventEmitter {
             entry.lastTerminalUpdateAt = event.occurredAt;
             if (bindingChanged)
                 this.emitUpdateDebounced();
-            return { ...entry.session };
+            return { session: { ...entry.session } };
         }
         const session = this.applyTerminalUpdate(entry, update);
         if (bindingChanged)
             this.emitUpdateDebounced();
-        return session;
+        return { session, statusUpdate: update };
     }
     bindSessionToVsCodeWindow(id, windowId) {
         const entry = this.sessions.get(id);

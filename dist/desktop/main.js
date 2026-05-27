@@ -32,6 +32,23 @@ const VSCODE_COMMAND_PATH = '/vscode-command';
 const SLACK_EVENT_PATH = '/slack-event';
 const SLACK_NOTIFICATION_PATH = '/slack-notification';
 const SLACK_NOTIFICATION_DISMISS_PATH = '/slack-notification-dismiss';
+const EXTENSION_VSCODE_TERMINAL_UPDATE_PATH = '/extensions/vscode/terminal-updates';
+const EXTENSION_VSCODE_TERMINAL_EVENT_PATH = '/extensions/vscode/terminal-events';
+const EXTENSION_VSCODE_WINDOW_PATH = '/extensions/vscode/windows';
+const EXTENSION_VSCODE_COMMAND_PATH = '/extensions/vscode/commands';
+const EXTENSION_VSCODE_TASKS_PATH = '/extensions/vscode/tasks';
+const EXTENSION_SLACK_EVENT_PATH = '/extensions/slack/events';
+const EXTENSION_SLACK_NOTIFICATION_PATH = '/extensions/slack/notifications';
+const EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH = '/extensions/slack/notification-dismiss';
+const BACKEND_EVENTS_PATH = '/api/events';
+const BACKEND_HEALTH_PATH = '/api/health';
+const BACKEND_STATE_PATH = '/api/state';
+const BACKEND_SERVER_SCRIPT_RELATIVE_PATH = node_path_1.default.join('..', 'http-server', 'server.js');
+const BACKEND_START_TIMEOUT_MS = 5000;
+const BACKEND_HEALTH_POLL_MS = 100;
+const BACKEND_EVENT_RECONNECT_MS = 1000;
+const LEGACY_IN_PROCESS_BACKEND_ENV = 'MULTITASKER_USE_IN_PROCESS_BACKEND';
+const BACKEND_OWNS_STATE_ENV = 'MULTITASKER_BACKEND_OWNS_STATE';
 const MAX_TERMINAL_EVENT_BODY_BYTES = 512 * 1024;
 const MAX_MANUAL_TASKS = 200;
 const MAX_MANUAL_TASK_TEXT_LENGTH = 4000;
@@ -42,7 +59,6 @@ const MAX_SLACK_TEXT_LENGTH = 4000;
 const MAX_SLACK_DEBUG_TEXT_LENGTH = 700;
 const MAX_PENDING_TERMINAL_EVENTS_PER_SESSION = 200;
 const MAX_PENDING_VSCODE_COMMANDS_PER_WINDOW = 50;
-const TERMINAL_DEBUG_OUTPUT_PREVIEW_LENGTH = 500;
 const VSCODE_WINDOW_FOCUS_AFTER_DEEPLINK_DELAY_MS = 1000;
 const VSCODE_COMMAND_LONG_POLL_TIMEOUT_MS = 25000;
 const MAX_VSCODE_FOCUS_CANDIDATES_IN_LOG = 5;
@@ -56,6 +72,16 @@ const SLACK_SOCKET_SCRIPT_RELATIVE_PATH = node_path_1.default.join('extension', 
 const SLACK_AUTH_OUTPUT_MAX_LENGTH = 4000;
 const SLACK_SOCKET_OUTPUT_MAX_LENGTH = 4000;
 const SLACK_USER_CONVERSATIONS_REFRESH_MS = 5 * 60 * 1000;
+const GOOGLE_CALENDAR_SCOPE = 'openid email profile https://www.googleapis.com/auth/calendar.readonly';
+const GOOGLE_CALENDAR_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
+const GOOGLE_CALENDAR_API_BASE_URL = 'https://www.googleapis.com/calendar/v3';
+const GOOGLE_CALENDAR_OAUTH_HOST = '127.0.0.1';
+const GOOGLE_CALENDAR_OAUTH_CALLBACK_PATH = '/oauth/google-calendar/callback';
+const GOOGLE_CALENDAR_AUTH_TIMEOUT_MS = 2 * 60 * 1000;
+const GOOGLE_CALENDAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const GOOGLE_CALENDAR_TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
+const MAX_GOOGLE_CALENDAR_EVENTS = 100;
 const SLACK_PRIORITY_MENTION = { rank: 0, label: 'mention' };
 const SLACK_PRIORITY_DM = { rank: 1, label: 'dm' };
 const SLACK_PRIORITY_THREAD_MENTION = { rank: 2, label: 'thread_mention' };
@@ -65,6 +91,13 @@ const SLACK_AUTHORIZE_URL_PATTERN = /https:\/\/slack\.com\/oauth\/v2\/authorize\
 let mainWindow = null;
 let sessionManager = null;
 let terminalUpdateServer = null;
+let backendProcess = null;
+let backendStartupPromise = null;
+let backendEventRequest = null;
+let backendEventReconnectTimer = null;
+let backendEventBuffer = '';
+let backendAvailable = false;
+let isQuitting = false;
 let windowStateSaveTimer = null;
 const pendingDeepLinks = [];
 const pendingTerminalUpdates = new Map();
@@ -81,6 +114,14 @@ const cachedVsCodeWindowHandlesByWindowId = new Map();
 const manualTasks = [];
 const recurringTasks = [];
 const slackNotifications = [];
+const googleCalendarEvents = [];
+const backendState = {
+    sessions: [],
+    manualTasks,
+    recurringTasks,
+    slackNotifications,
+    vscodeWindows: [],
+};
 const slackUserNameById = new Map();
 const slackBotNameById = new Map();
 const slackChannelInfoById = new Map();
@@ -100,6 +141,10 @@ let slackAuthedUserId = '';
 let slackAuthedUserConversationIds;
 let slackAuthedUserConversationsLoadedAt = 0;
 let recurringTaskTimer = null;
+let googleCalendarRefreshTimer = null;
+let googleCalendarAuthServer = null;
+let googleCalendarLastSyncedAt = 0;
+let googleCalendarOAuthConfigCache = { clientId: '', hasClientSecret: false };
 function isLocalShellType(value) {
     return value === 'powershell' || value === 'bash';
 }
@@ -130,6 +175,9 @@ function isTerminalEventType(value) {
 function isTerminalCaptureState(value) {
     return value === 'waiting_for_execution' || value === 'capturing' || value === 'unavailable';
 }
+function isRecord(value) {
+    return typeof value === 'object' && value !== null;
+}
 function readStringField(record, key) {
     const value = record[key];
     return typeof value === 'string' ? value : '';
@@ -151,9 +199,18 @@ function readStringArrayField(record, key) {
         .map(item => item.trim())
         .filter(item => item.length > 0);
 }
+class HttpBodyTooLargeError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'HttpBodyTooLargeError';
+    }
+}
 function buildVsCodeCompanionUri(session) {
     const launchId = (0, node_crypto_1.randomUUID)();
     pendingLaunchTaskIdByLaunchId.set(launchId, session.id);
+    return buildVsCodeCompanionUriWithLaunchId(session, launchId);
+}
+function buildVsCodeCompanionUriWithLaunchId(session, launchId) {
     const payload = {
         launchId,
         name: session.name,
@@ -205,6 +262,12 @@ function getVsCodeBindingStatus(session) {
         return 'none';
     const windowEntry = vscodeWindowsById.get(windowId);
     if (!windowEntry) {
+        if (session.terminalRef?.trim()) {
+            debugTerminalUpdate('vscode binding unverified; waiting for registered window with persisted terminal ref', getVsCodeOpenDebugDetails(session, {
+                windowId,
+            }));
+            return 'unverified';
+        }
         return 'none';
     }
     const reboundSession = bindSessionToMatchingVsCodeTerminal(session, windowEntry);
@@ -221,9 +284,10 @@ function getVsCodeBindingStatus(session) {
     return 'none';
 }
 function bindSessionToMatchingVsCodeTerminal(session, windowEntry) {
-    const terminal = findMatchingVsCodeTerminal(session, windowEntry);
-    if (!terminal)
+    const match = findMatchingVsCodeTerminal(session, windowEntry);
+    if (!match)
         return null;
+    const { terminal } = match;
     const reboundSession = sessionManager?.bindSessionToTerminal(session.id, buildTerminalBinding({
         vscodeWindowId: windowEntry.windowId,
         terminalRef: terminal.terminalRef,
@@ -246,6 +310,8 @@ function bindSessionToMatchingVsCodeTerminal(session, windowEntry) {
         terminalName: terminal.terminalName,
         terminalCwd: terminal.terminalCwd,
         windowId: windowEntry.windowId,
+        matchReason: match.reason,
+        matchScore: match.score,
     }));
     return reboundSession;
 }
@@ -257,13 +323,20 @@ function findMatchingVsCodeTerminal(session, windowEntry) {
     if (sessionTerminalRef) {
         const exactRefMatch = terminals.find(terminal => terminal.terminalRef === sessionTerminalRef);
         if (exactRefMatch)
-            return exactRefMatch;
+            return { terminal: exactRefMatch, reason: 'exact terminalRef' };
     }
     const sessionTerminalPid = session.terminalPid ?? getLegacyAttachedTerminalPid(session.id);
     if (sessionTerminalPid !== undefined) {
         const exactPidMatch = terminals.find(terminal => terminal.terminalPid === sessionTerminalPid);
         if (exactPidMatch)
-            return exactPidMatch;
+            return { terminal: exactPidMatch, reason: 'exact terminalPid' };
+    }
+    if (sessionTerminalRef) {
+        debugTerminalUpdate('vscode terminal match skipped; session already has terminalRef', getVsCodeOpenDebugDetails(session, {
+            windowId: windowEntry.windowId,
+            terminalRef: sessionTerminalRef,
+        }));
+        return null;
     }
     const normalizedSessionPath = normalizePathForCompare(session.cwd);
     const sessionName = session.name.trim().toLowerCase();
@@ -274,7 +347,22 @@ function findMatchingVsCodeTerminal(session, windowEntry) {
     }))
         .filter(candidate => candidate.score > 0)
         .sort((a, b) => b.score - a.score);
-    return scored[0]?.terminal ?? null;
+    const bestMatch = scored[0];
+    if (!bestMatch)
+        return null;
+    const tiedMatches = scored.filter(candidate => candidate.score === bestMatch.score);
+    if (tiedMatches.length > 1) {
+        debugTerminalUpdate('vscode terminal match skipped; ambiguous fallback candidates', getVsCodeOpenDebugDetails(session, {
+            windowId: windowEntry.windowId,
+            matchScore: bestMatch.score,
+            candidateCount: tiedMatches.length,
+            candidateTerminalRefs: tiedMatches.map(candidate => candidate.terminal.terminalRef),
+            candidateTerminalNames: tiedMatches.map(candidate => candidate.terminal.terminalName ?? ''),
+            candidateTerminalCwds: tiedMatches.map(candidate => candidate.terminal.terminalCwd ?? ''),
+        }));
+        return null;
+    }
+    return { terminal: bestMatch.terminal, reason: 'unique cwd/name fallback', score: bestMatch.score };
 }
 function scoreTerminalMatch(terminal, normalizedSessionPath, sessionName) {
     let score = 0;
@@ -300,7 +388,11 @@ function getLegacyAttachedTerminalPid(sessionId) {
     return Number.isFinite(parsed) ? parsed : undefined;
 }
 function rememberTaskTerminalBinding(taskId, binding) {
+    const previousTerminalRef = sessionManager?.getSession(taskId)?.terminalRef?.trim();
     const terminalRef = binding.terminalRef?.trim();
+    if (previousTerminalRef && terminalRef && previousTerminalRef !== terminalRef) {
+        taskIdByTerminalRef.delete(previousTerminalRef);
+    }
     if (terminalRef)
         taskIdByTerminalRef.set(terminalRef, taskId);
     sessionManager?.bindSessionToTerminal(taskId, buildTerminalBinding({
@@ -672,6 +764,7 @@ function getSlackScriptPath(relativePath) {
         node_path_1.default.join(electron_1.app.getAppPath(), relativePath),
         node_path_1.default.join(process.cwd(), relativePath),
         node_path_1.default.join(__dirname, '..', relativePath),
+        node_path_1.default.join(__dirname, '..', '..', relativePath),
     ];
     return candidates.find(candidate => node_fs_1.default.existsSync(candidate)) ?? null;
 }
@@ -826,6 +919,10 @@ function queueDisconnectSessionCommand(session) {
     return true;
 }
 function enqueueVsCodeCommand(windowId, command) {
+    if (shouldUseExternalBackend()) {
+        void queueBackendVsCodeCommand(windowId, command.type, command.terminalRef);
+        return;
+    }
     const queue = pendingVsCodeCommandsByWindowId.get(windowId) ?? [];
     queue.push(command);
     while (queue.length > MAX_PENDING_VSCODE_COMMANDS_PER_WINDOW)
@@ -856,6 +953,401 @@ function isVsCodeSessionRequest(value) {
 }
 function getErrorMessage(error) {
     return error instanceof Error ? error.message : String(error);
+}
+function shouldUseExternalBackend() {
+    return process.env[LEGACY_IN_PROCESS_BACKEND_ENV] !== '1';
+}
+function shouldBackendOwnState() {
+    return process.env[BACKEND_OWNS_STATE_ENV] === '1';
+}
+function getBackendUrl(pathName) {
+    return `http://${TERMINAL_UPDATE_HOST}:${TERMINAL_UPDATE_PORT}${pathName}`;
+}
+async function ensureBackendServer() {
+    if (!shouldUseExternalBackend())
+        return;
+    if (backendAvailable)
+        return;
+    if (backendStartupPromise)
+        return backendStartupPromise;
+    backendStartupPromise = startBackendServer();
+    try {
+        await backendStartupPromise;
+    }
+    finally {
+        backendStartupPromise = null;
+    }
+}
+async function startBackendServer() {
+    if (await waitForBackendHealth(BACKEND_HEALTH_POLL_MS)) {
+        backendAvailable = true;
+        if (shouldBackendOwnState())
+            await refreshBackendState();
+        connectBackendEventStream();
+        return;
+    }
+    const scriptPath = node_path_1.default.join(__dirname, BACKEND_SERVER_SCRIPT_RELATIVE_PATH);
+    const electronRunAsNode = process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {};
+    const child = (0, node_child_process_1.spawn)(process.execPath, [scriptPath], {
+        cwd: node_path_1.default.join(__dirname, '..', '..'),
+        env: {
+            ...process.env,
+            ...electronRunAsNode,
+            MULTITASKER_DATA_DIR: electron_1.app.getPath('userData'),
+        },
+        windowsHide: true,
+    });
+    backendProcess = child;
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+        if (isTerminalUpdateDebugEnabled())
+            console.info(chunk.trimEnd());
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+        console.error(chunk.trimEnd());
+    });
+    child.on('error', error => {
+        if (backendProcess === child)
+            backendProcess = null;
+        console.error(`Multitasker backend could not start: ${getErrorMessage(error)}`);
+    });
+    child.on('exit', code => {
+        if (backendProcess === child)
+            backendProcess = null;
+        backendAvailable = false;
+        if (!isQuitting) {
+            console.error(`Multitasker backend exited with code ${code ?? 'unknown'}`);
+            scheduleBackendEventReconnect();
+        }
+    });
+    if (!(await waitForBackendHealth(BACKEND_START_TIMEOUT_MS))) {
+        throw new Error('Multitasker backend did not become ready in time.');
+    }
+    backendAvailable = true;
+    if (shouldBackendOwnState())
+        await refreshBackendState();
+    connectBackendEventStream();
+}
+async function waitForBackendHealth(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+        try {
+            const response = await fetch(getBackendUrl(BACKEND_HEALTH_PATH));
+            if (response.ok)
+                return true;
+        }
+        catch {
+            // Backend is not accepting connections yet.
+        }
+        if (Date.now() >= deadline)
+            break;
+        await delay(Math.min(BACKEND_HEALTH_POLL_MS, Math.max(0, deadline - Date.now())));
+    } while (Date.now() <= deadline);
+    return false;
+}
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function backendGet(pathName) {
+    return backendJsonRequest('GET', pathName);
+}
+async function backendPost(pathName, body = {}) {
+    return backendJsonRequest('POST', pathName, body);
+}
+async function backendJsonRequest(method, pathName, body) {
+    await ensureBackendServer();
+    const init = { method };
+    if (method === 'POST') {
+        init.headers = { 'content-type': 'application/json; charset=utf-8' };
+        init.body = JSON.stringify(body ?? {});
+    }
+    const response = await fetch(getBackendUrl(pathName), init);
+    const parsed = await response.json();
+    if (!response.ok)
+        throw new Error(parsed.error ?? `Backend request failed: HTTP ${response.status}`);
+    return parsed;
+}
+async function refreshBackendState() {
+    try {
+        const result = await backendGet(BACKEND_STATE_PATH);
+        if (result.ok)
+            applyBackendState(result.state);
+    }
+    catch (error) {
+        console.error(`Failed to refresh backend state: ${getErrorMessage(error)}`);
+    }
+}
+function connectBackendEventStream() {
+    if (!shouldUseExternalBackend() || backendEventRequest)
+        return;
+    const request = (0, node_http_1.request)({
+        hostname: TERMINAL_UPDATE_HOST,
+        port: TERMINAL_UPDATE_PORT,
+        path: BACKEND_EVENTS_PATH,
+        method: 'GET',
+        headers: { accept: 'text/event-stream' },
+    }, response => {
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+            handleBackendEventChunk(chunk);
+        });
+        response.on('end', () => {
+            backendEventRequest = null;
+            scheduleBackendEventReconnect();
+        });
+    });
+    backendEventRequest = request;
+    request.on('error', () => {
+        backendEventRequest = null;
+        scheduleBackendEventReconnect();
+    });
+    request.end();
+}
+function scheduleBackendEventReconnect() {
+    if (!shouldUseExternalBackend() || isQuitting || backendEventReconnectTimer)
+        return;
+    backendEventReconnectTimer = setTimeout(() => {
+        backendEventReconnectTimer = null;
+        backendEventRequest = null;
+        backendAvailable = false;
+        void ensureBackendServer().catch(error => {
+            console.error(`Failed to reconnect to backend: ${getErrorMessage(error)}`);
+            scheduleBackendEventReconnect();
+        });
+    }, BACKEND_EVENT_RECONNECT_MS);
+}
+function stopBackendServer() {
+    backendAvailable = false;
+    if (backendEventReconnectTimer) {
+        clearTimeout(backendEventReconnectTimer);
+        backendEventReconnectTimer = null;
+    }
+    if (backendEventRequest) {
+        backendEventRequest.destroy();
+        backendEventRequest = null;
+    }
+    const child = backendProcess;
+    backendProcess = null;
+    if (child && child.exitCode === null && !child.killed)
+        child.kill();
+}
+function handleBackendEventChunk(chunk) {
+    backendEventBuffer += chunk.replace(/\r/g, '');
+    let separatorIndex = backendEventBuffer.indexOf('\n\n');
+    while (separatorIndex >= 0) {
+        const block = backendEventBuffer.slice(0, separatorIndex);
+        backendEventBuffer = backendEventBuffer.slice(separatorIndex + 2);
+        handleBackendEventBlock(block);
+        separatorIndex = backendEventBuffer.indexOf('\n\n');
+    }
+}
+function handleBackendEventBlock(block) {
+    let eventName = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) {
+            eventName = line.slice('event:'.length).trim();
+        }
+        else if (line.startsWith('data:')) {
+            dataLines.push(line.slice('data:'.length).trimStart());
+        }
+    }
+    if (dataLines.length === 0)
+        return;
+    try {
+        handleBackendEvent(eventName, JSON.parse(dataLines.join('\n')));
+    }
+    catch (error) {
+        console.error(`Failed to process backend event "${eventName}": ${getErrorMessage(error)}`);
+    }
+}
+function handleBackendEvent(eventName, payload) {
+    switch (eventName) {
+        case 'state':
+            if (isBackendState(payload))
+                applyBackendState(payload);
+            return;
+        case 'terminal:update': {
+            const update = parseTerminalUpdateRequest(payload);
+            if (update)
+                handleTerminalUpdate(update);
+            return;
+        }
+        case 'terminal:event': {
+            const event = parseTerminalEventRequest(payload);
+            if (event)
+                handleTerminalEvent(event);
+            return;
+        }
+        case 'session:list-update':
+            if (shouldBackendOwnState() && Array.isArray(payload))
+                applyBackendSessions(payload);
+            return;
+        case 'manual-task:list-update':
+            if (shouldBackendOwnState() && Array.isArray(payload))
+                applyBackendManualTasks(payload);
+            return;
+        case 'manual-task:add': {
+            const task = parseManualTaskState(payload);
+            if (task) {
+                addManualTask(task);
+            }
+            else {
+                console.error('Failed to add task from backend: invalid manual task payload');
+            }
+            return;
+        }
+        case 'recurring-task:list-update':
+            if (shouldBackendOwnState() && Array.isArray(payload))
+                applyBackendRecurringTasks(payload);
+            return;
+        case 'slack:notification':
+            if (isSlackNotification(payload)) {
+                if (shouldBackendOwnState()) {
+                    mainWindow?.webContents.send('slack:notification', payload);
+                }
+                else {
+                    handleSlackNotification(payload);
+                }
+                if (mainWindow && !mainWindow.isFocused())
+                    mainWindow.flashFrame(true);
+            }
+            return;
+        case 'slack:dismiss': {
+            const dismissRequest = parseSlackNotificationDismissRequest(payload);
+            if (dismissRequest)
+                handleSlackNotificationDismiss(dismissRequest);
+            return;
+        }
+        case 'slack:list-update':
+            if (shouldBackendOwnState() && Array.isArray(payload))
+                applyBackendSlackNotifications(payload);
+            return;
+        case 'vscode:windows-update':
+            if (Array.isArray(payload))
+                applyBackendVsCodeWindows(payload);
+            return;
+        default:
+            return;
+    }
+}
+function isBackendState(value) {
+    if (typeof value !== 'object' || value === null)
+        return false;
+    const candidate = value;
+    return Array.isArray(candidate.sessions) &&
+        Array.isArray(candidate.manualTasks) &&
+        Array.isArray(candidate.recurringTasks) &&
+        Array.isArray(candidate.slackNotifications) &&
+        Array.isArray(candidate.vscodeWindows);
+}
+function isSlackNotification(value) {
+    if (typeof value !== 'object' || value === null)
+        return false;
+    const candidate = value;
+    return typeof candidate.id === 'string' &&
+        typeof candidate.text === 'string' &&
+        typeof candidate.receivedAt === 'number';
+}
+function applyBackendState(state) {
+    if (shouldBackendOwnState()) {
+        applyBackendSessions(state.sessions);
+        applyBackendManualTasks(state.manualTasks);
+        applyBackendRecurringTasks(state.recurringTasks);
+        applyBackendSlackNotifications(state.slackNotifications);
+    }
+    applyBackendVsCodeWindows(state.vscodeWindows);
+}
+function applyBackendSessions(sessions) {
+    backendState.sessions = sessions.map(session => ({ ...session }));
+    mainWindow?.webContents.send('session:list-update', backendState.sessions);
+}
+function applyBackendManualTasks(tasks) {
+    manualTasks.length = 0;
+    manualTasks.push(...tasks.map(task => ({ ...task })));
+    mainWindow?.webContents.send('manual-task:list-update', manualTasks.map(task => ({ ...task })));
+}
+function applyBackendRecurringTasks(tasks) {
+    recurringTasks.length = 0;
+    recurringTasks.push(...tasks.map(cloneRecurringTask));
+    mainWindow?.webContents.send('recurring-task:list-update', recurringTasks.map(cloneRecurringTask));
+}
+function applyBackendSlackNotifications(notifications) {
+    slackNotifications.length = 0;
+    slackNotifications.push(...notifications.map(notification => ({ ...notification })));
+    mainWindow?.webContents.send('slack:list-update', slackNotifications.map(notification => ({ ...notification })));
+}
+function applyBackendVsCodeWindows(windows) {
+    backendState.vscodeWindows = windows.map(cloneVsCodeWindowEntry);
+    vscodeWindowsById.clear();
+    for (const windowEntry of backendState.vscodeWindows) {
+        rememberVsCodeWindow(windowEntry);
+    }
+}
+function cloneVsCodeWindowEntry(entry) {
+    const clone = {
+        windowId: entry.windowId,
+        lastSeenAt: entry.lastSeenAt,
+    };
+    if (entry.workspaceFolder)
+        clone.workspaceFolder = entry.workspaceFolder;
+    if (entry.workspaceName)
+        clone.workspaceName = entry.workspaceName;
+    if (entry.pid !== undefined)
+        clone.pid = entry.pid;
+    if (entry.terminals !== undefined)
+        clone.terminals = entry.terminals.map(terminal => ({ ...terminal }));
+    if (entry.sessionIds !== undefined)
+        clone.sessionIds = [...entry.sessionIds];
+    return clone;
+}
+function getBackendSession(id) {
+    return backendState.sessions.find(session => session.id === id) ?? null;
+}
+async function openSessionInVsCodeWithBackend(session) {
+    const refreshedSession = getBackendSession(session.id) ?? session;
+    debugTerminalUpdate('vscode open requested', getVsCodeOpenDebugDetails(refreshedSession));
+    try {
+        const windowId = refreshedSession.vscodeWindowId?.trim();
+        const terminalRef = refreshedSession.terminalRef?.trim();
+        if (windowId && terminalRef) {
+            const didRequestWindowFocus = canFocusRegisteredVsCodeWindow(refreshedSession)
+                ? await focusRegisteredVsCodeWindow(refreshedSession)
+                : false;
+            const didQueueTerminalFocus = await queueBackendVsCodeCommand(windowId, 'focus-terminal', terminalRef);
+            return didRequestWindowFocus || didQueueTerminalFocus;
+        }
+        const launchId = (0, node_crypto_1.randomUUID)();
+        await backendPost('/api/vscode/register-launch', {
+            launchId,
+            sessionId: refreshedSession.id,
+        });
+        const companionUri = buildVsCodeCompanionUriWithLaunchId(refreshedSession, launchId);
+        debugTerminalUpdate('vscode companion deeplink requested', getVsCodeOpenDebugDetails(refreshedSession, {
+            companionUri: redactVsCodeCompanionUri(companionUri),
+        }));
+        await electron_1.shell.openExternal(companionUri);
+        scheduleVsCodeWindowFocus(refreshedSession);
+        return true;
+    }
+    catch (error) {
+        debugTerminalUpdate('vscode open failed', getVsCodeOpenDebugDetails(refreshedSession, {
+            error: getErrorMessage(error),
+        }));
+        console.error('Failed to open VS Code:', getErrorMessage(error));
+        return false;
+    }
+}
+async function queueBackendVsCodeCommand(windowId, type, terminalRef) {
+    try {
+        await backendPost('/api/vscode/queue-command', { windowId, type, terminalRef });
+        return true;
+    }
+    catch (error) {
+        console.error(`Failed to queue VS Code command: ${getErrorMessage(error)}`);
+        return false;
+    }
 }
 function isTerminalUpdateDebugEnabled() {
     const value = process.env[TERMINAL_UPDATE_DEBUG_ENV]?.toLowerCase();
@@ -967,6 +1459,22 @@ function terminalUpdateDebugDetails(update) {
         exitCode: update.exitCode,
         exitReason: update.exitReason,
         reason: update.debugReason,
+        matchedText: update.debugMatchedText,
+    };
+}
+function terminalEventStatusDebugDetails(update) {
+    if (!update) {
+        return {
+            statusUpdate: false,
+            statusReason: 'terminal event did not produce a status update',
+        };
+    }
+    return {
+        statusUpdate: true,
+        computedStatus: update.status,
+        statusReason: update.debugReason,
+        statusExitCode: update.exitCode,
+        statusExitReason: update.exitReason,
     };
 }
 function terminalEventDebugDetails(event, sessionName) {
@@ -990,20 +1498,17 @@ function terminalEventDebugDetails(event, sessionName) {
         windowId: event.windowId,
         captureState: event.captureState,
         captureReason: event.captureReason,
-        output: event.output === undefined ? undefined : terminalOutputDebugPreview(event.output),
+        output: event.output === undefined ? undefined : terminalOutputDebugValue(event.output),
     };
 }
 function getTerminalEventSessionName(event) {
     const session = sessionManager?.getSession(event.id);
     return session?.name ?? event.terminalName;
 }
-function terminalOutputDebugPreview(output) {
-    const strippedOutput = stripTerminalControlSequences(output)
+function terminalOutputDebugValue(output) {
+    return stripTerminalControlSequences(output)
         .replace(/\n/g, '\\n')
         .replace(/\t/g, '\\t');
-    const start = Math.max(0, strippedOutput.length - TERMINAL_DEBUG_OUTPUT_PREVIEW_LENGTH);
-    const prefix = start > 0 ? '...' : '';
-    return `${prefix}${strippedOutput.slice(start)}`;
 }
 function stripTerminalControlSequences(value) {
     return value
@@ -1021,8 +1526,13 @@ function enqueueDeepLink(url) {
     flushPendingDeepLinks();
 }
 function flushPendingDeepLinks() {
-    if (!sessionManager)
+    if (shouldBackendOwnState()) {
+        if (!backendAvailable)
+            return;
+    }
+    else if (!sessionManager) {
         return;
+    }
     while (pendingDeepLinks.length > 0) {
         const deepLink = pendingDeepLinks.shift();
         if (!deepLink)
@@ -1217,7 +1727,8 @@ function findSessionForTerminalIdentity(identity) {
     const normalizedTerminalPath = normalizePathForCompare(identity.terminalCwd);
     if (!normalizedTerminalPath)
         return null;
-    return sessions.find(session => (!identity.windowId || !session.vscodeWindowId || session.vscodeWindowId === identity.windowId) &&
+    return sessions.find(session => !session.terminalRef?.trim() &&
+        (!identity.windowId || !session.vscodeWindowId || session.vscodeWindowId === identity.windowId) &&
         normalizePathForCompare(session.cwd) === normalizedTerminalPath) ?? null;
 }
 function createManualTask(textValue) {
@@ -1226,12 +1737,40 @@ function createManualTask(textValue) {
         console.error('Failed to add manual task: task text is required');
         return null;
     }
-    const task = {
+    return addManualTask({
         id: `manual-${(0, node_crypto_1.randomUUID)()}`,
         text: truncateManualTaskText(text),
         createdAt: Date.now(),
+    });
+}
+function readManualTaskText(payload) {
+    if (typeof payload === 'string')
+        return payload;
+    if (typeof payload !== 'object' || payload === null)
+        return '';
+    const record = payload;
+    return readStringField(record, 'text') || readStringField(record, 'title') || readStringField(record, 'task');
+}
+function parseManualTaskState(payload) {
+    if (typeof payload !== 'object' || payload === null)
+        return null;
+    const record = payload;
+    const id = readStringField(record, 'id').trim();
+    const text = readStringField(record, 'text').trim();
+    const createdAt = readOptionalNumberField(record, 'createdAt');
+    if (!id || !text || createdAt === undefined)
+        return null;
+    return {
+        id,
+        text: truncateManualTaskText(text),
+        createdAt,
     };
-    manualTasks.unshift(task);
+}
+function addManualTask(task) {
+    const existingIndex = manualTasks.findIndex(existing => existing.id === task.id);
+    if (existingIndex >= 0)
+        manualTasks.splice(existingIndex, 1);
+    manualTasks.unshift({ ...task });
     while (manualTasks.length > MAX_MANUAL_TASKS)
         manualTasks.pop();
     (0, settings_1.saveManualTasks)(manualTasks);
@@ -1257,10 +1796,10 @@ function truncateManualTaskText(text) {
         return text;
     return `${text.slice(0, MAX_MANUAL_TASK_TEXT_LENGTH - 1)}…`;
 }
-function createRecurringTask(textValue, timeValue, daysValue) {
+function createRecurringTask(textValue, timeValue, scheduleValue) {
     const text = typeof textValue === 'string' ? textValue.trim() : '';
     const time = typeof timeValue === 'string' ? timeValue.trim() : '';
-    const daysOfWeek = normalizeRecurringDays(daysValue);
+    const schedule = parseRecurringSchedule(scheduleValue);
     if (!text) {
         console.error('Failed to add recurring task: task text is required');
         return null;
@@ -1269,8 +1808,8 @@ function createRecurringTask(textValue, timeValue, daysValue) {
         console.error('Failed to add recurring task: invalid time');
         return null;
     }
-    if (daysOfWeek.length === 0) {
-        console.error('Failed to add recurring task: at least one weekday is required');
+    if (!schedule) {
+        console.error('Failed to add recurring task: invalid recurrence schedule');
         return null;
     }
     const now = new Date();
@@ -1278,10 +1817,17 @@ function createRecurringTask(textValue, timeValue, daysValue) {
         id: `recurring-${(0, node_crypto_1.randomUUID)()}`,
         text: truncateManualTaskText(text),
         time,
-        daysOfWeek,
+        frequency: schedule.frequency,
+        daysOfWeek: schedule.daysOfWeek,
         createdAt: now.getTime(),
         enabled: true,
     };
+    if (schedule.intervalDays !== undefined)
+        task.intervalDays = schedule.intervalDays;
+    if (schedule.dayOfMonth !== undefined)
+        task.dayOfMonth = schedule.dayOfMonth;
+    if (schedule.anchorDate)
+        task.anchorDate = schedule.anchorDate;
     const initialGeneratedDate = getInitialRecurringTaskGeneratedDate(task, now);
     if (initialGeneratedDate)
         task.lastGeneratedDate = initialGeneratedDate;
@@ -1306,6 +1852,36 @@ function removeRecurringTask(id) {
 function broadcastRecurringTasks() {
     mainWindow?.webContents.send('recurring-task:list-update', recurringTasks.map(cloneRecurringTask));
 }
+function parseRecurringSchedule(value) {
+    if (Array.isArray(value)) {
+        const daysOfWeek = normalizeRecurringDays(value);
+        return daysOfWeek.length > 0 ? { frequency: 'weekly', daysOfWeek } : null;
+    }
+    if (typeof value !== 'object' || value === null)
+        return null;
+    const record = value;
+    const frequency = normalizeRecurringFrequency(readStringField(record, 'frequency'));
+    if (frequency === 'daily') {
+        return { frequency, daysOfWeek: [0, 1, 2, 3, 4, 5, 6] };
+    }
+    if (frequency === 'interval') {
+        const intervalDays = normalizeRecurringIntervalDays(record['intervalDays']);
+        if (intervalDays === null)
+            return null;
+        return { frequency, daysOfWeek: [], intervalDays, anchorDate: getLocalDateKey(new Date()) };
+    }
+    if (frequency === 'monthly') {
+        const dayOfMonth = normalizeRecurringDayOfMonth(record['dayOfMonth']);
+        if (dayOfMonth === null)
+            return null;
+        return { frequency, daysOfWeek: [], dayOfMonth };
+    }
+    const daysOfWeek = normalizeRecurringDays(record['daysOfWeek']);
+    return daysOfWeek.length > 0 ? { frequency, daysOfWeek } : null;
+}
+function normalizeRecurringFrequency(value) {
+    return value === 'daily' || value === 'interval' || value === 'monthly' ? value : 'weekly';
+}
 function normalizeRecurringDays(value) {
     if (!Array.isArray(value))
         return [];
@@ -1313,8 +1889,19 @@ function normalizeRecurringDays(value) {
         .filter((day) => typeof day === 'number' && Number.isInteger(day) && day >= 0 && day <= 6);
     return [...new Set(days)].sort((a, b) => a - b);
 }
+function normalizeRecurringIntervalDays(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 3650 ? value : null;
+}
+function normalizeRecurringDayOfMonth(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 31 ? value : null;
+}
 function cloneRecurringTask(task) {
-    return { ...task, daysOfWeek: [...task.daysOfWeek] };
+    const clone = {
+        ...task,
+        frequency: task.frequency ?? 'weekly',
+        daysOfWeek: [...task.daysOfWeek],
+    };
+    return clone;
 }
 function getInitialRecurringTaskGeneratedDate(task, now) {
     if (!isRecurringTaskDue(task, now))
@@ -1354,12 +1941,35 @@ function runDueRecurringTasks(now = new Date()) {
 function isRecurringTaskDue(task, now) {
     if (!task.enabled)
         return false;
-    if (!task.daysOfWeek.includes(now.getDay()))
-        return false;
     const taskMinutes = parseRecurringTimeMinutes(task.time);
     if (taskMinutes === null)
         return false;
-    return getLocalMinutesSinceMidnight(now) >= taskMinutes;
+    if (getLocalMinutesSinceMidnight(now) < taskMinutes)
+        return false;
+    const frequency = task.frequency ?? 'weekly';
+    if (frequency === 'daily')
+        return true;
+    if (frequency === 'interval')
+        return isRecurringIntervalDue(task, now);
+    if (frequency === 'monthly')
+        return isRecurringMonthlyDue(task, now);
+    return task.daysOfWeek.includes(now.getDay());
+}
+function isRecurringIntervalDue(task, now) {
+    const intervalDays = task.intervalDays;
+    if (intervalDays === undefined || intervalDays < 1)
+        return false;
+    const anchorDate = parseLocalDateKey(task.anchorDate || getLocalDateKey(new Date(task.createdAt)));
+    if (!anchorDate)
+        return false;
+    const daysSinceAnchor = getLocalDateDiffDays(anchorDate, now);
+    return daysSinceAnchor >= 0 && daysSinceAnchor % intervalDays === 0;
+}
+function isRecurringMonthlyDue(task, now) {
+    const dayOfMonth = task.dayOfMonth;
+    if (dayOfMonth === undefined)
+        return false;
+    return now.getDate() === Math.min(dayOfMonth, getDaysInMonth(now));
 }
 function parseRecurringTimeMinutes(time) {
     const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
@@ -1375,6 +1985,723 @@ function getLocalDateKey(date) {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+}
+function parseLocalDateKey(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!match)
+        return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
+}
+function getLocalDateDiffDays(start, end) {
+    const startUtc = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate());
+    const endUtc = Date.UTC(end.getFullYear(), end.getMonth(), end.getDate());
+    return Math.floor((endUtc - startUtc) / 86_400_000);
+}
+function getDaysInMonth(date) {
+    return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+}
+function restorePersistedGoogleCalendarEvents() {
+    googleCalendarEvents.length = 0;
+    googleCalendarEvents.push(...filterActiveGoogleCalendarEvents((0, settings_1.loadGoogleCalendarEvents)()));
+}
+function cloneGoogleCalendarEvent(event) {
+    return { ...event };
+}
+function broadcastGoogleCalendarEvents() {
+    mainWindow?.webContents.send('google-calendar:list-update', googleCalendarEvents.map(cloneGoogleCalendarEvent));
+}
+function broadcastGoogleCalendarStatus(message = '') {
+    const status = getGoogleCalendarStatus(message);
+    mainWindow?.webContents.send('google-calendar:status-update', status);
+    return status;
+}
+async function getFreshGoogleCalendarStatus(message = '') {
+    await loadGoogleCalendarOAuthConfig();
+    return getGoogleCalendarStatus(message);
+}
+function getGoogleCalendarStatus(message = '', oauthConfig = googleCalendarOAuthConfigCache) {
+    const settings = (0, settings_1.loadSettings)().googleCalendar;
+    const connections = (0, settings_1.loadGoogleCalendarConnections)();
+    const lastSyncedAt = Math.max(0, ...connections.map(connection => connection.lastSyncedAt ?? 0));
+    const connected = connections.length > 0;
+    const configured = Boolean(oauthConfig.clientId.trim());
+    const status = {
+        connected,
+        configured,
+        enabled: settings.enabled,
+        calendarId: settings.calendarId,
+        lookAheadDays: settings.lookAheadDays,
+        ownedCalendarsOnly: settings.ownedCalendarsOnly,
+        accountCount: connections.length,
+        eventCount: googleCalendarEvents.length,
+        message: message || getDefaultGoogleCalendarStatusMessage(settings, configured, connected, connections.length),
+        connections: connections.map(getGoogleCalendarConnectionStatus),
+    };
+    if (lastSyncedAt || googleCalendarLastSyncedAt)
+        status.lastSyncedAt = Math.max(lastSyncedAt, googleCalendarLastSyncedAt);
+    return status;
+}
+function getGoogleCalendarConnectionStatus(connection) {
+    const status = {
+        id: connection.id,
+        calendarId: connection.calendarId,
+        lookAheadDays: connection.lookAheadDays,
+        enabled: connection.enabled,
+        connectedAt: connection.connectedAt,
+    };
+    if (connection.accountEmail)
+        status.accountEmail = connection.accountEmail;
+    if (connection.accountName)
+        status.accountName = connection.accountName;
+    if (connection.lastSyncedAt)
+        status.lastSyncedAt = connection.lastSyncedAt;
+    return status;
+}
+function getDefaultGoogleCalendarStatusMessage(settings, configured, connected, accountCount) {
+    if (!configured)
+        return 'Google Calendar OAuth env vars are not configured in the backend.';
+    if (!connected)
+        return 'Google Calendar is not connected.';
+    if (!settings.enabled)
+        return 'Google Calendar is connected but disabled.';
+    return googleCalendarLastSyncedAt
+        ? `Synced ${googleCalendarEvents.length} upcoming event(s) from ${accountCount} account(s).`
+        : `Google Calendar is connected to ${accountCount} account(s).`;
+}
+function startGoogleCalendarScheduler() {
+    if (googleCalendarRefreshTimer)
+        clearInterval(googleCalendarRefreshTimer);
+    if ((0, settings_1.loadSettings)().googleCalendar.enabled && (0, settings_1.loadGoogleCalendarConnections)().length > 0) {
+        void refreshGoogleCalendarEvents();
+    }
+    googleCalendarRefreshTimer = setInterval(() => {
+        if ((0, settings_1.loadSettings)().googleCalendar.enabled && (0, settings_1.loadGoogleCalendarConnections)().length > 0) {
+            void refreshGoogleCalendarEvents();
+        }
+    }, GOOGLE_CALENDAR_REFRESH_INTERVAL_MS);
+}
+function stopGoogleCalendarScheduler() {
+    if (googleCalendarRefreshTimer) {
+        clearInterval(googleCalendarRefreshTimer);
+        googleCalendarRefreshTimer = null;
+    }
+    stopGoogleCalendarAuthFlow();
+}
+function handleGoogleCalendarSettingsChanged() {
+    const settings = (0, settings_1.loadSettings)().googleCalendar;
+    if (!settings.enabled) {
+        googleCalendarEvents.length = 0;
+        (0, settings_1.saveGoogleCalendarEvents)(googleCalendarEvents);
+        broadcastGoogleCalendarEvents();
+        broadcastGoogleCalendarStatus();
+        return;
+    }
+    startGoogleCalendarScheduler();
+}
+async function loadGoogleCalendarOAuthConfig() {
+    try {
+        const response = await backendGet('/api/google-calendar/oauth-config');
+        googleCalendarOAuthConfigCache = {
+            clientId: typeof response.clientId === 'string' ? response.clientId.trim() : '',
+            hasClientSecret: response.hasClientSecret === true,
+        };
+    }
+    catch (error) {
+        googleCalendarOAuthConfigCache = { clientId: '', hasClientSecret: false };
+        console.error(`Failed to load Google Calendar OAuth config: ${getErrorMessage(error)}`);
+    }
+    return googleCalendarOAuthConfigCache;
+}
+async function startGoogleCalendarAuthFlow() {
+    const settings = (0, settings_1.loadSettings)().googleCalendar;
+    const oauthConfig = await loadGoogleCalendarOAuthConfig();
+    if (!oauthConfig.clientId.trim()) {
+        const message = 'Google Calendar OAuth env vars are required in the backend.';
+        return { ok: false, message, status: getGoogleCalendarStatus(message, oauthConfig) };
+    }
+    stopGoogleCalendarAuthFlow();
+    const state = (0, node_crypto_1.randomUUID)();
+    const codeVerifier = base64UrlEncode((0, node_crypto_1.randomBytes)(64));
+    const codeChallenge = base64UrlEncode((0, node_crypto_1.createHash)('sha256').update(codeVerifier).digest());
+    let redirectUri = '';
+    const result = new Promise((resolve) => {
+        let settled = false;
+        let timeout = null;
+        const finish = (ok, message) => {
+            if (settled)
+                return;
+            settled = true;
+            if (timeout)
+                clearTimeout(timeout);
+            stopGoogleCalendarAuthFlow();
+            const status = broadcastGoogleCalendarStatus(message);
+            resolve({ ok, message, status });
+        };
+        googleCalendarAuthServer = (0, node_http_1.createServer)((request, response) => {
+            void handleGoogleCalendarOAuthCallback(request, response, {
+                state,
+                codeVerifier,
+                redirectUri,
+                settings,
+                finish,
+            });
+        });
+        googleCalendarAuthServer.once('error', error => {
+            finish(false, `Google Calendar authorization server failed: ${getErrorMessage(error)}`);
+        });
+        googleCalendarAuthServer.listen(0, GOOGLE_CALENDAR_OAUTH_HOST, () => {
+            const address = googleCalendarAuthServer?.address();
+            if (!address || typeof address === 'string') {
+                finish(false, 'Google Calendar authorization server did not return a local port.');
+                return;
+            }
+            redirectUri = `http://${GOOGLE_CALENDAR_OAUTH_HOST}:${address.port}${GOOGLE_CALENDAR_OAUTH_CALLBACK_PATH}`;
+            timeout = setTimeout(() => {
+                finish(false, 'Google Calendar authorization timed out.');
+            }, GOOGLE_CALENDAR_AUTH_TIMEOUT_MS);
+            const authUrl = buildGoogleCalendarAuthUrl(oauthConfig, redirectUri, state, codeChallenge);
+            void electron_1.shell.openExternal(authUrl).catch(error => {
+                finish(false, `Could not open Google authorization page: ${getErrorMessage(error)}`);
+            });
+        });
+    });
+    broadcastGoogleCalendarStatus('Waiting for Google authorization...');
+    return result;
+}
+async function handleGoogleCalendarOAuthCallback(request, response, context) {
+    const requestUrl = new URL(request.url ?? '/', `http://${GOOGLE_CALENDAR_OAUTH_HOST}`);
+    if (requestUrl.pathname !== GOOGLE_CALENDAR_OAUTH_CALLBACK_PATH) {
+        writeGoogleCalendarOAuthResponse(response, false, 'Unsupported Google Calendar authorization callback.');
+        return;
+    }
+    const callbackState = requestUrl.searchParams.get('state') ?? '';
+    if (callbackState !== context.state) {
+        writeGoogleCalendarOAuthResponse(response, false, 'Google Calendar authorization state did not match.');
+        context.finish(false, 'Google Calendar authorization state did not match.');
+        return;
+    }
+    const callbackError = requestUrl.searchParams.get('error') ?? '';
+    if (callbackError) {
+        const message = `Google Calendar authorization failed: ${callbackError}`;
+        writeGoogleCalendarOAuthResponse(response, false, message);
+        context.finish(false, message);
+        return;
+    }
+    const code = requestUrl.searchParams.get('code') ?? '';
+    if (!code) {
+        writeGoogleCalendarOAuthResponse(response, false, 'Google Calendar authorization did not return a code.');
+        context.finish(false, 'Google Calendar authorization did not return a code.');
+        return;
+    }
+    try {
+        const token = await requestGoogleToken({
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: context.redirectUri,
+            code_verifier: context.codeVerifier,
+        });
+        const userInfo = await fetchGoogleUserInfo(token.accessToken);
+        const connections = (0, settings_1.loadGoogleCalendarConnections)();
+        const connectionId = getGoogleCalendarConnectionId(userInfo);
+        const existingConnection = connections.find(connection => connection.id === connectionId);
+        const refreshToken = token.refreshToken ?? existingConnection?.auth.refreshToken ?? '';
+        if (!refreshToken) {
+            throw new Error('Google did not return a refresh token. Revoke Multitasker access in your Google account and connect again.');
+        }
+        const auth = {
+            accessToken: token.accessToken,
+            refreshToken,
+            expiresAt: Date.now() + (token.expiresIn ?? 3600) * 1000,
+        };
+        if (token.tokenType)
+            auth.tokenType = token.tokenType;
+        if (token.scope)
+            auth.scope = token.scope;
+        const connection = {
+            id: connectionId,
+            calendarId: context.settings.calendarId,
+            lookAheadDays: context.settings.lookAheadDays,
+            enabled: true,
+            connectedAt: existingConnection?.connectedAt ?? Date.now(),
+            auth,
+        };
+        if (userInfo.email)
+            connection.accountEmail = userInfo.email;
+        if (userInfo.name)
+            connection.accountName = userInfo.name;
+        if (existingConnection?.lastSyncedAt)
+            connection.lastSyncedAt = existingConnection.lastSyncedAt;
+        (0, settings_1.saveGoogleCalendarConnections)([
+            connection,
+            ...connections.filter(candidate => candidate.id !== connection.id),
+        ]);
+        (0, settings_1.clearGoogleCalendarAuth)();
+        const currentSettings = (0, settings_1.loadSettings)();
+        (0, settings_1.saveSettings)({
+            ...currentSettings,
+            googleCalendar: {
+                ...currentSettings.googleCalendar,
+                enabled: true,
+            },
+        });
+        await refreshGoogleCalendarEvents();
+        const accountLabel = getGoogleCalendarConnectionLabel(connection);
+        writeGoogleCalendarOAuthResponse(response, true, `Google Calendar connected for ${accountLabel}. You can close this tab.`);
+        context.finish(true, `Google Calendar connected for ${accountLabel}.`);
+    }
+    catch (error) {
+        const message = `Google Calendar authorization failed: ${getErrorMessage(error)}`;
+        writeGoogleCalendarOAuthResponse(response, false, message);
+        context.finish(false, message);
+    }
+}
+function writeGoogleCalendarOAuthResponse(response, ok, message) {
+    const body = `<!doctype html><html><body style="font-family:system-ui,sans-serif;background:#0d1117;color:#c9d1d9;padding:24px"><h1>${ok ? 'Connected' : 'Authorization failed'}</h1><p>${escapeHtml(message)}</p></body></html>`;
+    response.writeHead(ok ? 200 : 400, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+    });
+    response.end(body);
+}
+function buildGoogleCalendarAuthUrl(oauthConfig, redirectUri, state, codeChallenge) {
+    const url = new URL(GOOGLE_CALENDAR_AUTH_URL);
+    url.searchParams.set('client_id', oauthConfig.clientId.trim());
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('scope', GOOGLE_CALENDAR_SCOPE);
+    url.searchParams.set('access_type', 'offline');
+    url.searchParams.set('prompt', 'select_account consent');
+    url.searchParams.set('state', state);
+    url.searchParams.set('code_challenge', codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+    return url.toString();
+}
+function stopGoogleCalendarAuthFlow() {
+    const server = googleCalendarAuthServer;
+    googleCalendarAuthServer = null;
+    if (!server)
+        return;
+    try {
+        server.close();
+    }
+    catch {
+        // Server may not have started listening yet.
+    }
+}
+async function refreshGoogleCalendarEvents() {
+    const settings = (0, settings_1.loadSettings)().googleCalendar;
+    if (!settings.enabled)
+        return broadcastGoogleCalendarStatus('Google Calendar is disabled.');
+    const oauthConfig = await loadGoogleCalendarOAuthConfig();
+    if (!oauthConfig.clientId.trim())
+        return broadcastGoogleCalendarStatus('Google Calendar OAuth env vars are required in the backend.');
+    const connections = (0, settings_1.loadGoogleCalendarConnections)();
+    if (connections.length === 0)
+        return broadcastGoogleCalendarStatus('Google Calendar is not connected.');
+    const events = [];
+    const failures = [];
+    try {
+        for (const connection of connections) {
+            if (!connection.enabled)
+                continue;
+            try {
+                const accessToken = await getValidGoogleCalendarAccessToken(connection);
+                const connectionEvents = await fetchGoogleCalendarEvents(settings, connection, accessToken);
+                connection.lastSyncedAt = Date.now();
+                events.push(...connectionEvents);
+            }
+            catch (error) {
+                const accountLabel = getGoogleCalendarConnectionLabel(connection);
+                failures.push(accountLabel);
+                console.error(`Google Calendar sync failed for ${accountLabel}: ${getErrorMessage(error)}`);
+            }
+        }
+        googleCalendarLastSyncedAt = Date.now();
+        (0, settings_1.saveGoogleCalendarConnections)(connections);
+        googleCalendarEvents.length = 0;
+        googleCalendarEvents.push(...filterActiveGoogleCalendarEvents(events).sort((a, b) => a.startMs - b.startMs));
+        (0, settings_1.saveGoogleCalendarEvents)(googleCalendarEvents);
+        broadcastGoogleCalendarEvents();
+        if (failures.length > 0) {
+            return broadcastGoogleCalendarStatus(`Synced ${googleCalendarEvents.length} event(s); ${failures.length} account(s) failed.`);
+        }
+        return broadcastGoogleCalendarStatus(`Synced ${googleCalendarEvents.length} upcoming Google Calendar event(s) from ${connections.length} account(s).`);
+    }
+    catch (error) {
+        const message = `Google Calendar sync failed: ${getErrorMessage(error)}`;
+        console.error(message);
+        return broadcastGoogleCalendarStatus(message);
+    }
+}
+async function getValidGoogleCalendarAccessToken(connection) {
+    if (connection.auth.expiresAt > Date.now() + GOOGLE_CALENDAR_TOKEN_REFRESH_BUFFER_MS) {
+        return connection.auth.accessToken;
+    }
+    connection.auth = await refreshGoogleCalendarAccessToken(connection.auth);
+    return connection.auth.accessToken;
+}
+async function refreshGoogleCalendarAccessToken(auth) {
+    const token = await requestGoogleToken({
+        grant_type: 'refresh_token',
+        refresh_token: auth.refreshToken,
+    });
+    const refreshedAuth = {
+        accessToken: token.accessToken,
+        refreshToken: token.refreshToken ?? auth.refreshToken,
+        expiresAt: Date.now() + (token.expiresIn ?? 3600) * 1000,
+    };
+    const tokenType = token.tokenType ?? auth.tokenType;
+    if (tokenType)
+        refreshedAuth.tokenType = tokenType;
+    const scope = token.scope ?? auth.scope;
+    if (scope)
+        refreshedAuth.scope = scope;
+    return refreshedAuth;
+}
+async function requestGoogleToken(params) {
+    const response = await backendPost('/api/google-calendar/token', params);
+    if (!response.ok || response.token === undefined) {
+        throw new Error(response.error || 'Google token request failed.');
+    }
+    return parseGoogleTokenResponse(response.token);
+}
+function parseGoogleTokenResponse(payload) {
+    if (!isRecord(payload))
+        throw new Error('Google token response was not an object.');
+    const accessToken = readStringField(payload, 'access_token').trim();
+    if (!accessToken)
+        throw new Error('Google token response did not include an access token.');
+    const token = { accessToken };
+    const refreshToken = readStringField(payload, 'refresh_token').trim();
+    if (refreshToken)
+        token.refreshToken = refreshToken;
+    const expiresIn = readOptionalNumberField(payload, 'expires_in');
+    if (expiresIn !== undefined)
+        token.expiresIn = expiresIn;
+    const tokenType = readStringField(payload, 'token_type').trim();
+    if (tokenType)
+        token.tokenType = tokenType;
+    const scope = readStringField(payload, 'scope').trim();
+    if (scope)
+        token.scope = scope;
+    return token;
+}
+async function fetchGoogleUserInfo(accessToken) {
+    const response = await fetch(GOOGLE_USERINFO_URL, {
+        headers: { authorization: `Bearer ${accessToken}` },
+    });
+    const rawBody = await response.text();
+    const payload = parseJsonResponseBody(rawBody);
+    if (!response.ok) {
+        throw new Error(`Google user info request failed (${response.status}): ${getGoogleApiErrorMessage(payload, rawBody)}`);
+    }
+    return parseGoogleUserInfo(payload);
+}
+function parseGoogleUserInfo(payload) {
+    if (!isRecord(payload))
+        throw new Error('Google user info response was not an object.');
+    const id = readStringField(payload, 'id').trim();
+    const email = readStringField(payload, 'email').trim();
+    const name = readStringField(payload, 'name').trim();
+    const accountId = id || email;
+    if (!accountId)
+        throw new Error('Google user info response did not include an account id or email.');
+    return {
+        id: accountId,
+        ...(email ? { email } : {}),
+        ...(name ? { name } : {}),
+    };
+}
+function getGoogleCalendarConnectionId(userInfo) {
+    return `google:${(0, node_crypto_1.createHash)('sha256').update(userInfo.id).digest('hex').slice(0, 16)}`;
+}
+function getGoogleCalendarConnectionLabel(connection) {
+    return connection.accountEmail || connection.accountName || connection.id;
+}
+async function fetchGoogleCalendarEvents(settings, connection, accessToken) {
+    const calendarId = connection.calendarId.trim() || 'primary';
+    if (settings.ownedCalendarsOnly && !(await isOwnedGoogleCalendar(calendarId, accessToken))) {
+        console.info(`Skipping shared Google Calendar "${calendarId}" for ${getGoogleCalendarConnectionLabel(connection)}.`);
+        return [];
+    }
+    const now = new Date();
+    const timeMin = startOfLocalDay(now).toISOString();
+    const timeMax = new Date(now.getTime() + connection.lookAheadDays * 86_400_000).toISOString();
+    const url = new URL(`${GOOGLE_CALENDAR_API_BASE_URL}/calendars/${encodeURIComponent(calendarId)}/events`);
+    url.searchParams.set('singleEvents', 'true');
+    url.searchParams.set('orderBy', 'startTime');
+    url.searchParams.set('timeMin', timeMin);
+    url.searchParams.set('timeMax', timeMax);
+    url.searchParams.set('maxResults', String(MAX_GOOGLE_CALENDAR_EVENTS));
+    const response = await fetch(url, {
+        headers: { authorization: `Bearer ${accessToken}` },
+    });
+    const rawBody = await response.text();
+    const payload = parseJsonResponseBody(rawBody);
+    if (!response.ok) {
+        throw new Error(`Google Calendar request failed (${response.status}): ${getGoogleApiErrorMessage(payload, rawBody)}`);
+    }
+    const eventsResponse = parseGoogleCalendarEventsResponse(payload);
+    return filterActiveGoogleCalendarEvents((eventsResponse.items ?? [])
+        .map(event => parseGoogleCalendarEvent(connection, calendarId, event))
+        .filter((event) => event !== null), now).sort((a, b) => a.startMs - b.startMs);
+}
+async function isOwnedGoogleCalendar(calendarId, accessToken) {
+    const normalizedCalendarId = calendarId.trim() || 'primary';
+    const entry = normalizedCalendarId.toLowerCase() === 'primary'
+        ? await fetchPrimaryGoogleCalendarListEntry(accessToken)
+        : await fetchGoogleCalendarListEntry(normalizedCalendarId, accessToken);
+    return entry?.accessRole === 'owner';
+}
+async function fetchPrimaryGoogleCalendarListEntry(accessToken) {
+    const entries = await fetchGoogleCalendarListEntries(accessToken);
+    return entries.find(entry => entry.primary === true) ?? null;
+}
+async function fetchGoogleCalendarListEntry(calendarId, accessToken) {
+    const url = new URL(`${GOOGLE_CALENDAR_API_BASE_URL}/users/me/calendarList/${encodeURIComponent(calendarId)}`);
+    const response = await fetch(url, {
+        headers: { authorization: `Bearer ${accessToken}` },
+    });
+    const rawBody = await response.text();
+    const payload = parseJsonResponseBody(rawBody);
+    if (response.status === 404)
+        return null;
+    if (!response.ok) {
+        throw new Error(`Google Calendar list request failed (${response.status}): ${getGoogleApiErrorMessage(payload, rawBody)}`);
+    }
+    return parseGoogleCalendarListEntry(payload);
+}
+async function fetchGoogleCalendarListEntries(accessToken) {
+    const entries = [];
+    let pageToken = '';
+    do {
+        const url = new URL(`${GOOGLE_CALENDAR_API_BASE_URL}/users/me/calendarList`);
+        url.searchParams.set('maxResults', '250');
+        url.searchParams.set('showHidden', 'true');
+        if (pageToken)
+            url.searchParams.set('pageToken', pageToken);
+        const response = await fetch(url, {
+            headers: { authorization: `Bearer ${accessToken}` },
+        });
+        const rawBody = await response.text();
+        const payload = parseJsonResponseBody(rawBody);
+        if (!response.ok) {
+            throw new Error(`Google Calendar list request failed (${response.status}): ${getGoogleApiErrorMessage(payload, rawBody)}`);
+        }
+        const page = parseGoogleCalendarListResponse(payload);
+        entries.push(...page.items);
+        pageToken = page.nextPageToken;
+    } while (pageToken);
+    return entries;
+}
+function parseGoogleCalendarListResponse(payload) {
+    if (!isRecord(payload))
+        throw new Error('Google Calendar list response was not an object.');
+    const items = payload['items'];
+    const nextPageToken = readStringField(payload, 'nextPageToken').trim();
+    return {
+        items: Array.isArray(items)
+            ? items.map(parseGoogleCalendarListEntry).filter((entry) => entry !== null)
+            : [],
+        nextPageToken,
+    };
+}
+function parseGoogleCalendarListEntry(payload) {
+    if (!isRecord(payload))
+        return null;
+    const id = readStringField(payload, 'id').trim();
+    if (!id)
+        return null;
+    const entry = { id };
+    const summary = readStringField(payload, 'summary').trim();
+    const accessRole = readStringField(payload, 'accessRole').trim();
+    const primary = readOptionalBooleanField(payload, 'primary');
+    if (summary)
+        entry.summary = summary;
+    if (accessRole)
+        entry.accessRole = accessRole;
+    if (primary !== undefined)
+        entry.primary = primary;
+    return entry;
+}
+function parseGoogleCalendarEventsResponse(payload) {
+    if (!isRecord(payload))
+        throw new Error('Google Calendar response was not an object.');
+    const items = payload['items'];
+    if (!Array.isArray(items))
+        return { items: [] };
+    return {
+        items: items
+            .filter(isRecord)
+            .map(parseGoogleCalendarRawEvent),
+    };
+}
+function parseGoogleCalendarRawEvent(item) {
+    const event = {};
+    const id = readStringField(item, 'id').trim();
+    if (id)
+        event.id = id;
+    const status = readStringField(item, 'status').trim();
+    if (status)
+        event.status = status;
+    const summary = readStringField(item, 'summary').trim();
+    if (summary)
+        event.summary = summary;
+    const htmlLink = readStringField(item, 'htmlLink').trim();
+    if (htmlLink)
+        event.htmlLink = htmlLink;
+    const location = readStringField(item, 'location').trim();
+    if (location)
+        event.location = location;
+    const updated = readStringField(item, 'updated').trim();
+    if (updated)
+        event.updated = updated;
+    const start = parseGoogleCalendarRawEventDate(item['start']);
+    if (start)
+        event.start = start;
+    const end = parseGoogleCalendarRawEventDate(item['end']);
+    if (end)
+        event.end = end;
+    return event;
+}
+function parseGoogleCalendarRawEventDate(value) {
+    if (!isRecord(value))
+        return undefined;
+    const date = readStringField(value, 'date').trim();
+    const dateTime = readStringField(value, 'dateTime').trim();
+    if (!date && !dateTime)
+        return undefined;
+    return {
+        ...(date ? { date } : {}),
+        ...(dateTime ? { dateTime } : {}),
+    };
+}
+function parseGoogleCalendarEvent(connection, calendarId, rawEvent) {
+    if (!rawEvent.id || rawEvent.status === 'cancelled' || !rawEvent.start || !rawEvent.end)
+        return null;
+    const start = parseGoogleCalendarEventDate(rawEvent.start);
+    const end = parseGoogleCalendarEventDate(rawEvent.end);
+    if (!start || !end)
+        return null;
+    const event = {
+        id: `${connection.id}:${calendarId}:${rawEvent.id}`,
+        connectionId: connection.id,
+        calendarId,
+        summary: rawEvent.summary?.trim() || '(no title)',
+        start: start.value,
+        end: end.value,
+        startMs: start.ms,
+        endMs: end.ms,
+        allDay: start.allDay,
+    };
+    if (connection.accountEmail)
+        event.accountEmail = connection.accountEmail;
+    if (connection.accountName)
+        event.accountName = connection.accountName;
+    if (rawEvent.htmlLink)
+        event.htmlLink = rawEvent.htmlLink;
+    if (rawEvent.location)
+        event.location = rawEvent.location;
+    if (rawEvent.updated)
+        event.updated = rawEvent.updated;
+    return event;
+}
+function parseGoogleCalendarEventDate(value) {
+    if (value.dateTime) {
+        const ms = Date.parse(value.dateTime);
+        return Number.isFinite(ms) ? { value: value.dateTime, ms, allDay: false } : null;
+    }
+    if (!value.date)
+        return null;
+    const date = parseLocalDateKey(value.date);
+    return date ? { value: value.date, ms: date.getTime(), allDay: true } : null;
+}
+function filterActiveGoogleCalendarEvents(events, now = new Date()) {
+    const nowMs = now.getTime();
+    return events.filter(event => event.endMs >= nowMs).slice(0, MAX_GOOGLE_CALENDAR_EVENTS);
+}
+function startOfLocalDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+function parseJsonResponseBody(rawBody) {
+    if (!rawBody.trim())
+        return {};
+    try {
+        return JSON.parse(rawBody);
+    }
+    catch {
+        return {};
+    }
+}
+function getGoogleApiErrorMessage(payload, fallback) {
+    if (!isRecord(payload))
+        return fallback.slice(0, 500);
+    const errorDescription = readStringField(payload, 'error_description').trim();
+    if (errorDescription)
+        return errorDescription;
+    const rawError = payload['error'];
+    if (typeof rawError === 'string' && rawError.trim())
+        return rawError.trim();
+    if (isRecord(rawError)) {
+        const message = readStringField(rawError, 'message').trim();
+        if (message)
+            return message;
+    }
+    return fallback.slice(0, 500);
+}
+function base64UrlEncode(buffer) {
+    return buffer.toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '');
+}
+function disconnectGoogleCalendar(connectionId) {
+    if (typeof connectionId === 'string' && connectionId.trim()) {
+        const normalizedConnectionId = connectionId.trim();
+        const connections = (0, settings_1.loadGoogleCalendarConnections)()
+            .filter(connection => connection.id !== normalizedConnectionId);
+        (0, settings_1.saveGoogleCalendarConnections)(connections);
+        googleCalendarEvents.splice(0, googleCalendarEvents.length, ...googleCalendarEvents.filter(event => event.connectionId !== normalizedConnectionId));
+        (0, settings_1.saveGoogleCalendarEvents)(googleCalendarEvents);
+        broadcastGoogleCalendarEvents();
+        return broadcastGoogleCalendarStatus('Google Calendar account disconnected.');
+    }
+    (0, settings_1.clearGoogleCalendarAuth)();
+    (0, settings_1.clearGoogleCalendarConnections)();
+    (0, settings_1.clearGoogleCalendarEvents)();
+    googleCalendarEvents.length = 0;
+    googleCalendarLastSyncedAt = 0;
+    const settings = (0, settings_1.loadSettings)();
+    (0, settings_1.saveSettings)({
+        ...settings,
+        googleCalendar: {
+            ...settings.googleCalendar,
+            enabled: false,
+        },
+    });
+    broadcastGoogleCalendarEvents();
+    return broadcastGoogleCalendarStatus('Google Calendar disconnected.');
+}
+async function openGoogleCalendarEvent(id) {
+    if (typeof id !== 'string' || !id.trim())
+        return false;
+    const event = googleCalendarEvents.find(candidate => candidate.id === id.trim());
+    if (!event?.htmlLink)
+        return false;
+    await electron_1.shell.openExternal(event.htmlLink);
+    return true;
+}
+function escapeHtml(value) {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 function parseSlackNotificationRequest(payload) {
     if (typeof payload !== 'object' || payload === null)
@@ -2306,7 +3633,9 @@ function getSlackNotificationAppTargetUrl(notification) {
     if (channelId) {
         const messageTs = notification.ts?.trim();
         const messageQuery = messageTs ? `&message=${encodeURIComponent(messageTs)}` : '';
-        return `slack://channel?team=${encodeURIComponent(teamId)}&id=${encodeURIComponent(channelId)}${messageQuery}`;
+        const threadTs = getSlackNotificationThreadReplyTs(notification);
+        const threadQuery = threadTs ? `&thread_ts=${encodeURIComponent(threadTs)}` : '';
+        return `slack://channel?team=${encodeURIComponent(teamId)}&id=${encodeURIComponent(channelId)}${messageQuery}${threadQuery}`;
     }
     const channelType = notification.channelType?.trim();
     const userId = notification.userId?.trim();
@@ -2326,10 +3655,20 @@ function getSlackNotificationWebTargetUrl(notification) {
     const messageTs = notification.ts?.trim();
     if (messageTs)
         targetUrl.searchParams.set('message_ts', messageTs);
+    const threadTs = getSlackNotificationThreadReplyTs(notification);
+    if (threadTs) {
+        targetUrl.searchParams.set('thread_ts', threadTs);
+        targetUrl.searchParams.set('cid', channelId);
+    }
     const teamId = notification.teamId?.trim();
     if (teamId)
         targetUrl.searchParams.set('team', teamId);
     return targetUrl.toString();
+}
+function getSlackNotificationThreadReplyTs(notification) {
+    const threadTs = notification.threadTs?.trim();
+    const messageTs = notification.ts?.trim();
+    return threadTs && threadTs !== messageTs ? threadTs : '';
 }
 function restorePersistedSlackNotifications() {
     slackNotifications.length = 0;
@@ -2401,7 +3740,14 @@ function parseVsCodeTerminalRegistration(payload) {
         terminal.captureReason = captureReason;
     return terminal;
 }
-function startTerminalUpdateServer() {
+async function startTerminalUpdateServer() {
+    if (shouldUseExternalBackend()) {
+        await ensureBackendServer();
+        return;
+    }
+    startLegacyTerminalUpdateServer();
+}
+function startLegacyTerminalUpdateServer() {
     if (terminalUpdateServer)
         return;
     const server = (0, node_http_1.createServer)((request, response) => {
@@ -2420,6 +3766,7 @@ function startTerminalUpdateServer() {
     terminalUpdateServer = server;
 }
 function stopTerminalUpdateServer() {
+    stopBackendServer();
     if (!terminalUpdateServer)
         return;
     closePendingVsCodeCommandPolls();
@@ -2437,20 +3784,32 @@ async function handleTerminalUpdateHttpRequest(request, response) {
     }
     const requestUrl = new URL(request.url ?? '/', `http://${TERMINAL_UPDATE_HOST}`);
     const requestPath = requestUrl.pathname;
-    if (request.method === 'GET' && requestPath === VSCODE_COMMAND_PATH) {
+    if (request.method === 'GET' && isVsCodeCommandPath(requestPath)) {
         handleVsCodeCommandPoll(requestUrl, response);
         return;
     }
-    const isTerminalUpdatePath = requestPath === TERMINAL_UPDATE_PATH;
-    const isTerminalEventPath = requestPath === TERMINAL_EVENT_PATH;
-    const isVsCodeWindowPath = requestPath === VSCODE_WINDOW_PATH;
-    const isSlackEventPath = requestPath === SLACK_EVENT_PATH;
-    const isSlackNotificationPath = requestPath === SLACK_NOTIFICATION_PATH;
-    const isSlackNotificationDismissPath = requestPath === SLACK_NOTIFICATION_DISMISS_PATH;
+    const isTerminalUpdatePath = requestPath === TERMINAL_UPDATE_PATH ||
+        requestPath === EXTENSION_VSCODE_TERMINAL_UPDATE_PATH;
+    const isTerminalEventPath = requestPath === TERMINAL_EVENT_PATH ||
+        requestPath === EXTENSION_VSCODE_TERMINAL_EVENT_PATH;
+    const isVsCodeWindowPath = requestPath === VSCODE_WINDOW_PATH ||
+        requestPath === EXTENSION_VSCODE_WINDOW_PATH;
+    const isVsCodeTaskPath = requestPath === EXTENSION_VSCODE_TASKS_PATH;
+    const isTaskApiPath = requestPath === '/api/tasks' ||
+        requestPath === '/api/task/add' ||
+        requestPath === '/api/manual-task/add';
+    const isSlackEventPath = requestPath === SLACK_EVENT_PATH ||
+        requestPath === EXTENSION_SLACK_EVENT_PATH;
+    const isSlackNotificationPath = requestPath === SLACK_NOTIFICATION_PATH ||
+        requestPath === EXTENSION_SLACK_NOTIFICATION_PATH;
+    const isSlackNotificationDismissPath = requestPath === SLACK_NOTIFICATION_DISMISS_PATH ||
+        requestPath === EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH;
     if (request.method !== 'POST' ||
         (!isTerminalUpdatePath &&
             !isTerminalEventPath &&
             !isVsCodeWindowPath &&
+            !isVsCodeTaskPath &&
+            !isTaskApiPath &&
             !isSlackEventPath &&
             !isSlackNotificationPath &&
             !isSlackNotificationDismissPath)) {
@@ -2462,7 +3821,8 @@ async function handleTerminalUpdateHttpRequest(request, response) {
         parsedPayload = JSON.parse(await readHttpBody(request));
     }
     catch (error) {
-        writeJsonResponse(response, 400, { ok: false, error: getErrorMessage(error) });
+        const statusCode = error instanceof HttpBodyTooLargeError ? 413 : 400;
+        writeJsonResponse(response, statusCode, { ok: false, error: getErrorMessage(error) });
         return;
     }
     if (isVsCodeWindowPath) {
@@ -2472,6 +3832,15 @@ async function handleTerminalUpdateHttpRequest(request, response) {
             return;
         }
         rememberVsCodeWindow(registration);
+    }
+    else if (isVsCodeTaskPath || isTaskApiPath) {
+        const task = createManualTask(readManualTaskText(parsedPayload));
+        if (!task) {
+            writeJsonResponse(response, 400, { ok: false, error: 'invalid_manual_task' });
+            return;
+        }
+        writeJsonResponse(response, 200, { ok: true, task });
+        return;
     }
     else if (isSlackEventPath) {
         try {
@@ -2597,16 +3966,28 @@ function readVsCodeWindowRegistrationFromUrl(requestUrl, windowId) {
 function readHttpBody(request) {
     return new Promise((resolve, reject) => {
         let body = '';
+        let bodyBytes = 0;
+        let rejected = false;
         request.setEncoding('utf8');
         request.on('data', (chunk) => {
-            body += chunk;
-            if (Buffer.byteLength(body, 'utf8') > MAX_TERMINAL_EVENT_BODY_BYTES) {
-                reject(new Error('terminal event payload is too large'));
-                request.destroy();
+            if (rejected)
+                return;
+            bodyBytes += Buffer.byteLength(chunk, 'utf8');
+            if (bodyBytes > MAX_TERMINAL_EVENT_BODY_BYTES) {
+                rejected = true;
+                reject(new HttpBodyTooLargeError('request payload is too large'));
+                return;
             }
+            body += chunk;
         });
-        request.on('end', () => resolve(body));
-        request.on('error', reject);
+        request.on('end', () => {
+            if (!rejected)
+                resolve(body);
+        });
+        request.on('error', error => {
+            if (!rejected)
+                reject(error);
+        });
     });
 }
 function writeJsonResponse(response, statusCode, body) {
@@ -2616,6 +3997,9 @@ function writeJsonResponse(response, statusCode, body) {
         'content-length': Buffer.byteLength(encodedBody),
     });
     response.end(encodedBody);
+}
+function isVsCodeCommandPath(requestPath) {
+    return requestPath === VSCODE_COMMAND_PATH || requestPath === EXTENSION_VSCODE_COMMAND_PATH;
 }
 function rememberVsCodeWindow(registration) {
     const existingEntry = vscodeWindowsById.get(registration.windowId);
@@ -2653,13 +4037,10 @@ function bindSessionsToVsCodeTerminals(registration) {
     if (terminals.length === 0)
         return;
     let didBindSession = false;
-    for (const terminal of terminals) {
-        const mappedTaskId = taskIdByTerminalRef.get(terminal.terminalRef);
-        const session = mappedTaskId
-            ? sessionManager?.getSession(mappedTaskId)
-            : findSessionForTerminalRegistration(registration, terminal);
-        if (!session)
-            continue;
+    const boundSessionIds = new Set();
+    const bindTerminal = (session, terminal, matchReason) => {
+        if (boundSessionIds.has(session.id))
+            return;
         const previousTerminalRef = session.terminalRef;
         const reboundSession = sessionManager?.bindSessionToTerminal(session.id, buildTerminalBinding({
             vscodeWindowId: registration.windowId,
@@ -2669,8 +4050,12 @@ function bindSessionsToVsCodeTerminals(registration) {
             terminalCaptureReason: terminal.captureReason,
         }));
         if (!reboundSession)
-            continue;
+            return;
+        if (previousTerminalRef && previousTerminalRef !== terminal.terminalRef) {
+            taskIdByTerminalRef.delete(previousTerminalRef);
+        }
         taskIdByTerminalRef.set(terminal.terminalRef, reboundSession.id);
+        boundSessionIds.add(reboundSession.id);
         if (previousTerminalRef !== terminal.terminalRef || session.status === 'detached') {
             didBindSession = true;
             debugTerminalUpdate('session rebound to vscode terminal', {
@@ -2681,27 +4066,74 @@ function bindSessionsToVsCodeTerminals(registration) {
                 terminalPid: terminal.terminalPid,
                 terminalName: terminal.terminalName,
                 terminalCwd: terminal.terminalCwd,
+                matchReason,
             });
         }
+    };
+    for (const terminal of terminals) {
+        const session = findKnownSessionForTerminalRef(terminal.terminalRef);
+        if (session)
+            bindTerminal(session, terminal, 'known terminalRef');
+    }
+    for (const terminal of terminals) {
+        if (taskIdByTerminalRef.has(terminal.terminalRef))
+            continue;
+        const match = findSessionForTerminalRegistration(registration, terminal, boundSessionIds);
+        if (match)
+            bindTerminal(match.session, terminal, match.reason);
     }
     if (didBindSession)
         (0, settings_1.saveSessions)(getSessionsStateToSave());
 }
-function findSessionForTerminalRegistration(registration, terminal) {
-    const sessions = sessionManager?.getSessions() ?? [];
+function findKnownSessionForTerminalRef(terminalRef) {
+    const mappedTaskId = taskIdByTerminalRef.get(terminalRef);
+    if (mappedTaskId)
+        return sessionManager?.getSession(mappedTaskId) ?? null;
+    return sessionManager?.getSessions().find(session => session.terminalRef === terminalRef) ?? null;
+}
+function findSessionForTerminalRegistration(registration, terminal, excludedSessionIds) {
+    const sessions = (sessionManager?.getSessions() ?? [])
+        .filter(session => !excludedSessionIds.has(session.id));
     const exactRef = sessions.find(session => session.terminalRef === terminal.terminalRef);
     if (exactRef)
-        return exactRef;
+        return { session: exactRef, reason: 'exact terminalRef' };
     if (terminal.terminalPid !== undefined) {
         const exactPid = sessions.find(session => (session.terminalPid ?? getLegacyAttachedTerminalPid(session.id)) === terminal.terminalPid);
         if (exactPid)
-            return exactPid;
+            return { session: exactPid, reason: 'exact terminalPid' };
     }
     const terminalPath = normalizePathForCompare(terminal.terminalCwd ?? '');
     if (!terminalPath)
         return null;
-    return sessions.find(session => (!session.vscodeWindowId || session.vscodeWindowId === registration.windowId) &&
-        normalizePathForCompare(session.cwd) === terminalPath) ?? null;
+    const matchingTerminals = (registration.terminals ?? [])
+        .filter(candidate => normalizePathForCompare(candidate.terminalCwd ?? '') === terminalPath);
+    if (matchingTerminals.length > 1) {
+        debugTerminalUpdate('session terminal rebind skipped; ambiguous cwd terminals', {
+            vscodeWindowId: registration.windowId,
+            terminalRef: terminal.terminalRef,
+            terminalCwd: terminal.terminalCwd,
+            candidateCount: matchingTerminals.length,
+            candidateTerminalRefs: matchingTerminals.map(candidate => candidate.terminalRef),
+            candidateTerminalNames: matchingTerminals.map(candidate => candidate.terminalName ?? ''),
+        });
+        return null;
+    }
+    const matchingSessions = sessions.filter(session => !session.terminalRef?.trim() &&
+        (!session.vscodeWindowId || session.vscodeWindowId === registration.windowId) &&
+        normalizePathForCompare(session.cwd) === terminalPath);
+    if (matchingSessions.length > 1) {
+        debugTerminalUpdate('session terminal rebind skipped; ambiguous cwd sessions', {
+            vscodeWindowId: registration.windowId,
+            terminalRef: terminal.terminalRef,
+            terminalCwd: terminal.terminalCwd,
+            candidateCount: matchingSessions.length,
+            candidateSessionIds: matchingSessions.map(session => session.id),
+            candidateSessionNames: matchingSessions.map(session => session.name),
+        });
+        return null;
+    }
+    const matchingSession = matchingSessions[0];
+    return matchingSession ? { session: matchingSession, reason: 'unique cwd fallback' } : null;
 }
 function bindSessionsToVsCodeWindow(registration) {
     if (!registration.sessionIds || registration.sessionIds.length === 0)
@@ -2748,13 +4180,15 @@ function applyTerminalUpdate(update) {
 function applyTerminalEvent(event) {
     const previousSession = sessionManager?.getSession(event.id) ?? null;
     const sessionName = previousSession?.name ?? event.terminalName;
-    const session = sessionManager?.updateTerminalEvent(event) ?? null;
-    if (!session) {
+    const result = sessionManager?.updateTerminalEventWithDetails(event) ?? null;
+    if (!result) {
         debugTerminalUpdate('terminal event could not be applied', terminalEventDebugDetails(event, sessionName));
         return false;
     }
+    const { session, statusUpdate } = result;
     debugTerminalUpdate('terminal event applied', {
         ...terminalEventDebugDetails(event, session.name),
+        ...terminalEventStatusDebugDetails(statusUpdate),
         previousStatus: previousSession?.status,
         nextStatus: session.status,
     });
@@ -2854,6 +4288,34 @@ function flushPendingTerminalEvents(id) {
     });
 }
 function processDeepLink(url) {
+    if (shouldBackendOwnState()) {
+        void processDeepLinkWithBackend(url);
+        return;
+    }
+    processLegacyDeepLink(url);
+}
+async function processDeepLinkWithBackend(url) {
+    try {
+        const result = await backendPost('/api/deeplink', { url });
+        if (!result.ok) {
+            console.error('Failed to open deep link:', result.error ?? 'backend rejected deep link');
+            return;
+        }
+        if (result.action === 'open-vscode' && result.session) {
+            void openSessionInVsCodeWithBackend(result.session);
+        }
+        if (mainWindow) {
+            if (mainWindow.isMinimized())
+                mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+        }
+    }
+    catch (error) {
+        console.error('Failed to open deep link:', getErrorMessage(error));
+    }
+}
+function processLegacyDeepLink(url) {
     if (!sessionManager)
         return;
     let parsedUrl;
@@ -2957,7 +4419,7 @@ function parseDeepLinkPayload(rawPayload) {
     }
     throw new Error('Invalid payload JSON');
 }
-function setupIpc() {
+function setupLegacyIpc() {
     electron_1.ipcMain.handle('session:create', (_e, name, cmd, cwd, shellType, sshCommand = '') => {
         const settings = (0, settings_1.loadSettings)();
         const normalizedShellType = isShellType(shellType) ? shellType : settings.defaultShell;
@@ -2974,18 +4436,28 @@ function setupIpc() {
         }
         return session;
     });
-    electron_1.ipcMain.handle('session:remove', (_e, id) => {
-        const session = sessionManager?.getSession(id);
-        if (session?.status === 'detached' || session?.status === 'stopped' || session?.status === 'error') {
-            markSessionRemoved(id);
-            sessionManager?.removeSession(id);
-        }
-        else {
+    electron_1.ipcMain.handle('session:remove', async (_e, id) => {
+        try {
+            const session = sessionManager?.getSession(id);
             if (session)
                 queueDisconnectSessionCommand(session);
-            sessionManager?.detachSession(id);
+            if (shouldBackendOwnState()) {
+                await backendPost('/api/session/remove', { id });
+            }
+            else {
+                if (session?.status === 'detached' || session?.status === 'stopped' || session?.status === 'error') {
+                    markSessionRemoved(id);
+                    sessionManager?.removeSession(id);
+                }
+                else {
+                    sessionManager?.detachSession(id);
+                }
+                (0, settings_1.saveSessions)(getSessionsStateToSave());
+            }
         }
-        (0, settings_1.saveSessions)(getSessionsStateToSave());
+        catch (error) {
+            console.error(`Failed to remove session: ${getErrorMessage(error)}`);
+        }
     });
     electron_1.ipcMain.handle('session:rename', (_e, id, name) => {
         const sessionId = typeof id === 'string' ? id.trim() : '';
@@ -3047,6 +4519,7 @@ function setupIpc() {
     electron_1.ipcMain.handle('settings:get', () => (0, settings_1.loadSettings)());
     electron_1.ipcMain.handle('settings:set', (_e, settings) => {
         (0, settings_1.saveSettings)(settings);
+        handleGoogleCalendarSettingsChanged();
     });
     electron_1.ipcMain.handle('manual-task:list', () => manualTasks.map(task => ({ ...task })));
     electron_1.ipcMain.handle('manual-task:add', (_event, text) => createManualTask(text));
@@ -3058,7 +4531,7 @@ function setupIpc() {
         return removeManualTask(id.trim());
     });
     electron_1.ipcMain.handle('recurring-task:list', () => recurringTasks.map(cloneRecurringTask));
-    electron_1.ipcMain.handle('recurring-task:add', (_event, text, time, daysOfWeek) => createRecurringTask(text, time, daysOfWeek));
+    electron_1.ipcMain.handle('recurring-task:add', (_event, text, time, schedule) => createRecurringTask(text, time, schedule));
     electron_1.ipcMain.handle('recurring-task:remove', (_event, id) => {
         if (typeof id !== 'string' || !id.trim()) {
             console.error('Failed to remove recurring task: missing task id');
@@ -3091,6 +4564,217 @@ function setupIpc() {
     electron_1.ipcMain.handle('slack:start-auth', () => startSlackAuthFlow());
     electron_1.ipcMain.handle('slack:start-listener', () => startSlackSocketListener({ notifyIfMissingConfig: true }));
     electron_1.ipcMain.handle('slack:get-listener-status', () => slackListenerStatus);
+}
+function setupBackendIpc() {
+    electron_1.ipcMain.handle('session:create', async (_e, name, cmd, cwd, shellType, sshCommand = '') => {
+        try {
+            const result = await backendPost('/api/session/create', {
+                name,
+                cmd,
+                cwd,
+                shellType,
+                sshCommand,
+            });
+            const session = result.session;
+            if (session)
+                void openSessionInVsCodeWithBackend(session);
+            return session;
+        }
+        catch (error) {
+            console.error(`Failed to create session: ${getErrorMessage(error)}`);
+            return null;
+        }
+    });
+    electron_1.ipcMain.handle('session:rename', async (_e, id, name) => {
+        try {
+            const result = await backendPost('/api/session/rename', { id, name });
+            return result.session;
+        }
+        catch (error) {
+            console.error(`Failed to rename session: ${getErrorMessage(error)}`);
+            return null;
+        }
+    });
+    electron_1.ipcMain.handle('session:list', async () => {
+        try {
+            const result = await backendGet('/api/sessions');
+            applyBackendSessions(result.sessions);
+            return result.sessions;
+        }
+        catch (error) {
+            console.error(`Failed to list sessions: ${getErrorMessage(error)}`);
+            return backendState.sessions;
+        }
+    });
+    electron_1.ipcMain.handle('session:open-review', (_e, cwd) => {
+        const settings = (0, settings_1.loadSettings)();
+        const cmd = settings.reviewTool.replace('{path}', `"${cwd}"`);
+        (0, node_child_process_1.exec)(cmd, (err) => {
+            if (err)
+                console.error('Failed to open review tool:', err.message);
+        });
+    });
+    electron_1.ipcMain.handle('editor:open-vscode', async (_e, session) => {
+        if (!isVsCodeSessionRequest(session)) {
+            console.error('Failed to open VS Code: invalid session payload');
+            return false;
+        }
+        if (session.shellType === 'ssh') {
+            if (!session.sshCommand?.trim()) {
+                console.error('Failed to open VS Code: missing SSH command');
+                return false;
+            }
+        }
+        else if (!session.cwd.trim()) {
+            console.error('Failed to open VS Code: missing session path');
+            return false;
+        }
+        const touched = await backendPost('/api/session/touch', { id: session.id })
+            .then(result => result.session ?? session)
+            .catch(() => session);
+        return openSessionInVsCodeWithBackend(touched);
+    });
+    electron_1.ipcMain.handle('session:pick-dir', async () => {
+        if (!mainWindow)
+            return null;
+        const result = await electron_1.dialog.showOpenDialog(mainWindow, {
+            properties: ['openDirectory'],
+        });
+        return result.canceled ? null : (result.filePaths[0] ?? null);
+    });
+    electron_1.ipcMain.handle('settings:get', async () => {
+        try {
+            const result = await backendGet('/api/settings');
+            return result.settings;
+        }
+        catch {
+            return (0, settings_1.loadSettings)();
+        }
+    });
+    electron_1.ipcMain.handle('settings:set', async (_e, settings) => {
+        await backendPost('/api/settings', settings);
+        handleGoogleCalendarSettingsChanged();
+    });
+    electron_1.ipcMain.handle('manual-task:list', async () => {
+        try {
+            const result = await backendGet('/api/manual-tasks');
+            applyBackendManualTasks(result.manualTasks);
+            return result.manualTasks;
+        }
+        catch (error) {
+            console.error(`Failed to list manual tasks: ${getErrorMessage(error)}`);
+            return manualTasks.map(task => ({ ...task }));
+        }
+    });
+    electron_1.ipcMain.handle('manual-task:add', async (_event, text) => {
+        try {
+            const result = await backendPost('/api/manual-task/add', { text });
+            return result.task;
+        }
+        catch (error) {
+            console.error(`Failed to add manual task: ${getErrorMessage(error)}`);
+            return null;
+        }
+    });
+    electron_1.ipcMain.handle('manual-task:remove', async (_event, id) => {
+        try {
+            const result = await backendPost('/api/manual-task/remove', { id });
+            return result.removed ?? false;
+        }
+        catch (error) {
+            console.error(`Failed to remove manual task: ${getErrorMessage(error)}`);
+            return false;
+        }
+    });
+    electron_1.ipcMain.handle('recurring-task:list', async () => {
+        try {
+            const result = await backendGet('/api/recurring-tasks');
+            applyBackendRecurringTasks(result.recurringTasks);
+            return result.recurringTasks;
+        }
+        catch (error) {
+            console.error(`Failed to list recurring tasks: ${getErrorMessage(error)}`);
+            return recurringTasks.map(cloneRecurringTask);
+        }
+    });
+    electron_1.ipcMain.handle('recurring-task:add', async (_event, text, time, schedule) => {
+        try {
+            const result = await backendPost('/api/recurring-task/add', {
+                text,
+                time,
+                schedule,
+            });
+            return result.task;
+        }
+        catch (error) {
+            console.error(`Failed to add recurring task: ${getErrorMessage(error)}`);
+            return null;
+        }
+    });
+    electron_1.ipcMain.handle('recurring-task:remove', async (_event, id) => {
+        try {
+            const result = await backendPost('/api/recurring-task/remove', { id });
+            return result.removed ?? false;
+        }
+        catch (error) {
+            console.error(`Failed to remove recurring task: ${getErrorMessage(error)}`);
+            return false;
+        }
+    });
+    electron_1.ipcMain.handle('slack:list', async () => {
+        try {
+            const result = await backendGet('/api/slack/notifications');
+            applyBackendSlackNotifications(result.slackNotifications);
+            return result.slackNotifications;
+        }
+        catch (error) {
+            console.error(`Failed to list Slack notifications: ${getErrorMessage(error)}`);
+            return slackNotifications.map(notification => ({ ...notification }));
+        }
+    });
+    electron_1.ipcMain.handle('slack:clear', async () => {
+        await backendPost('/api/slack/clear');
+    });
+    electron_1.ipcMain.handle('slack:remove', async (_event, id) => {
+        try {
+            const result = await backendPost('/api/slack/remove', { id });
+            return result.removed ?? false;
+        }
+        catch {
+            return false;
+        }
+    });
+    electron_1.ipcMain.handle('slack:open', async (_event, id) => {
+        if (typeof id !== 'string' || !id.trim())
+            return false;
+        try {
+            return await openSlackNotification(id.trim());
+        }
+        catch (error) {
+            console.error(`Failed to open Slack notification: ${getErrorMessage(error)}`);
+            return false;
+        }
+    });
+    electron_1.ipcMain.handle('slack:start-auth', () => startSlackAuthFlow());
+    electron_1.ipcMain.handle('slack:start-listener', () => startSlackSocketListener({ notifyIfMissingConfig: true }));
+    electron_1.ipcMain.handle('slack:get-listener-status', () => slackListenerStatus);
+}
+function setupIpc() {
+    if (shouldBackendOwnState()) {
+        setupBackendIpc();
+    }
+    else {
+        setupLegacyIpc();
+    }
+    setupGoogleCalendarIpc();
+}
+function setupGoogleCalendarIpc() {
+    electron_1.ipcMain.handle('google-calendar:list', () => googleCalendarEvents.map(cloneGoogleCalendarEvent));
+    electron_1.ipcMain.handle('google-calendar:status', () => getFreshGoogleCalendarStatus());
+    electron_1.ipcMain.handle('google-calendar:connect', () => startGoogleCalendarAuthFlow());
+    electron_1.ipcMain.handle('google-calendar:disconnect', (_event, id) => disconnectGoogleCalendar(id));
+    electron_1.ipcMain.handle('google-calendar:refresh', () => refreshGoogleCalendarEvents());
+    electron_1.ipcMain.handle('google-calendar:open', (_event, id) => openGoogleCalendarEvent(id));
 }
 function getSessionsStateToSave() {
     const allSessions = sessionManager?.getSessions() ?? [];
@@ -3178,8 +4862,9 @@ function saveWindowStateForWindow(window) {
     });
 }
 function createWindow() {
-    const settings = (0, settings_1.loadSettings)();
-    sessionManager = new sessionManager_1.SessionManager();
+    const backendOwnsState = shouldBackendOwnState();
+    if (!backendOwnsState)
+        sessionManager = new sessionManager_1.SessionManager();
     const savedWindowState = getRestorableWindowState();
     const windowOptions = {
         width: savedWindowState?.width ?? WINDOW_WIDTH,
@@ -3191,6 +4876,7 @@ function createWindow() {
             preload: node_path_1.default.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            backgroundThrottling: false,
         },
     };
     if (savedWindowState) {
@@ -3201,19 +4887,36 @@ function createWindow() {
     if (savedWindowState?.isMaximized)
         mainWindow.maximize();
     trackWindowState(mainWindow);
-    sessionManager.on('sessionUpdate', (sessions) => {
-        mainWindow?.webContents.send('session:list-update', sessions);
-    });
+    if (!backendOwnsState) {
+        sessionManager?.on('sessionUpdate', (sessions) => {
+            mainWindow?.webContents.send('session:list-update', sessions);
+        });
+    }
     mainWindow.on('focus', () => {
         mainWindow?.flashFrame(false);
-        sessionManager?.refreshGitChanges();
+        if (backendOwnsState) {
+            void backendGet('/api/sessions')
+                .then(result => applyBackendSessions(result.sessions))
+                .catch(error => console.error(`Failed to refresh backend sessions: ${getErrorMessage(error)}`));
+        }
+        else {
+            sessionManager?.refreshGitChanges();
+        }
     });
-    restorePersistedSessions(settings);
-    restorePersistedManualTasks();
-    restorePersistedRecurringTasks();
-    restorePersistedSlackNotifications();
-    startRecurringTaskScheduler();
-    void mainWindow.loadFile(node_path_1.default.join(__dirname, '..', 'index.html'));
+    if (backendOwnsState) {
+        applyBackendState(backendState);
+    }
+    else {
+        const settings = (0, settings_1.loadSettings)();
+        restorePersistedSessions(settings);
+        restorePersistedManualTasks();
+        restorePersistedRecurringTasks();
+        restorePersistedSlackNotifications();
+        startRecurringTaskScheduler();
+    }
+    restorePersistedGoogleCalendarEvents();
+    startGoogleCalendarScheduler();
+    void mainWindow.loadFile(node_path_1.default.join(__dirname, '..', '..', 'index.html'));
 }
 setupIpc();
 const hasSingleInstanceLock = electron_1.app.requestSingleInstanceLock();
@@ -3234,15 +4937,22 @@ electron_1.app.on('open-url', (event, url) => {
 const startupDeepLink = getDeepLinkFromArgv(process.argv);
 if (startupDeepLink)
     enqueueDeepLink(startupDeepLink);
-void electron_1.app.whenReady().then(() => {
+void electron_1.app.whenReady().then(async () => {
+    (0, settings_1.setStorageDirectory)(electron_1.app.getPath('userData'));
     if (process.defaultApp && process.argv[1]) {
         electron_1.app.setAsDefaultProtocolClient(MULTITASKER_PROTOCOL, process.execPath, [node_path_1.default.resolve(process.argv[1])]);
     }
     else {
         electron_1.app.setAsDefaultProtocolClient(MULTITASKER_PROTOCOL);
     }
-    createWindow();
-    startTerminalUpdateServer();
+    if (shouldBackendOwnState()) {
+        await startTerminalUpdateServer();
+        createWindow();
+    }
+    else {
+        createWindow();
+        await startTerminalUpdateServer();
+    }
     startSlackSocketListener({ notifyIfMissingConfig: false });
     flushPendingDeepLinks();
     electron_1.app.on('activate', () => {
@@ -3252,7 +4962,9 @@ void electron_1.app.whenReady().then(() => {
     });
 });
 electron_1.app.on('before-quit', () => {
+    isQuitting = true;
     stopRecurringTaskScheduler();
+    stopGoogleCalendarScheduler();
     stopSlackAuthFlow();
     stopSlackSocketListener();
     stopTerminalUpdateServer();

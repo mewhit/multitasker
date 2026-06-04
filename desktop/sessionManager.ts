@@ -1,11 +1,25 @@
 import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { ShellType } from './settings';
+import { ShellType, SessionSshOptions } from './settings';
 import { TerminalEventParser, type TerminalCaptureState, type TerminalEvent } from './terminalEvents';
 
-export type { ShellType };
-export type SessionStatus = 'waiting' | 'starting' | 'running' | 'needs_attention' | 'error' | 'stopped' | 'detached';
+export type { ShellType, SessionSshOptions };
+export type SessionStatus = 'waiting' | 'starting' | 'running' | 'needs_attention' | 'paused' | 'error' | 'stopped' | 'detached';
+
+/**
+ * Metadata about the client (terminal host) that owns a session. Mirrors
+ * shell/core/protocol.ts#ClientMetadata. Kept duplicated to avoid creating a
+ * cross-package dep from desktop/ to shell/.
+ */
+export type ClientMetadata = {
+  kind: 'vscode';
+  workspace?: string;
+  ipcHook?: string;
+  pid?: number;
+  version?: string;
+  termProgram?: string;
+};
 
 const SESSION_UPDATE_DEBOUNCE_MS = 250;
 const GIT_CHANGE_CHECK_DEBOUNCE_MS = 1000;
@@ -33,20 +47,20 @@ export interface Session {
   cwd: string;
   shellType: ShellType;
   sshCommand?: string;
+  sshOptions?: SessionSshOptions;
   status: SessionStatus;
   lastActivity: number;
   gitChanges: boolean;
   terminalExitCode?: number;
   terminalExitReason?: string;
-  vscodeWindowId?: string;
   terminalRef?: string;
   terminalPid?: number;
   terminalCaptureState?: TerminalCaptureState;
   terminalCaptureReason?: string;
+  clientMetadata?: ClientMetadata;
 }
 
 export interface TerminalBinding {
-  vscodeWindowId?: string;
   terminalRef?: string;
   terminalPid?: number;
   terminalCaptureState?: TerminalCaptureState;
@@ -74,13 +88,12 @@ export class SessionManager extends EventEmitter {
     shellType: ShellType = 'powershell',
     requestedId = '',
     sshCommand = '',
-    vscodeWindowId = '',
     terminalRef = '',
-    terminalPid?: number
+    terminalPid?: number,
+    sshOptions?: SessionSshOptions
   ): Session {
     const id = requestedId.trim() || randomUUID();
     const trimmedSshCommand = sshCommand.trim();
-    const trimmedVsCodeWindowId = vscodeWindowId.trim();
     const trimmedTerminalRef = terminalRef.trim();
     const effectiveCwd = shellType === 'ssh'
       ? cwd.trim()
@@ -98,7 +111,11 @@ export class SessionManager extends EventEmitter {
       } else {
         delete existingEntry.session.sshCommand;
       }
-      if (trimmedVsCodeWindowId) existingEntry.session.vscodeWindowId = trimmedVsCodeWindowId;
+      if (sshOptions) {
+        existingEntry.session.sshOptions = sshOptions;
+      } else if (shellType !== 'ssh') {
+        delete existingEntry.session.sshOptions;
+      }
       if (trimmedTerminalRef) existingEntry.session.terminalRef = trimmedTerminalRef;
       if (terminalPid !== undefined) existingEntry.session.terminalPid = terminalPid;
       if (existingEntry.session.status !== INITIAL_SESSION_STATUS) existingEntry.statusChangedAt = now;
@@ -127,7 +144,7 @@ export class SessionManager extends EventEmitter {
       gitChanges: false,
     };
     if (trimmedSshCommand) session.sshCommand = trimmedSshCommand;
-    if (trimmedVsCodeWindowId) session.vscodeWindowId = trimmedVsCodeWindowId;
+    if (sshOptions) session.sshOptions = sshOptions;
     if (trimmedTerminalRef) session.terminalRef = trimmedTerminalRef;
     if (terminalPid !== undefined) session.terminalPid = terminalPid;
 
@@ -162,6 +179,7 @@ export class SessionManager extends EventEmitter {
     const entry = this.sessions.get(update.id);
     if (!entry) return null;
     if (entry.session.status === 'detached') return { ...entry.session };
+    if (entry.session.status === 'paused' && update.status !== 'running') return { ...entry.session };
     if (update.occurredAt < entry.lastTerminalUpdateAt) return { ...entry.session };
 
     return this.applyTerminalUpdate(entry, update);
@@ -180,7 +198,6 @@ export class SessionManager extends EventEmitter {
     if (event.occurredAt < entry.lastTerminalUpdateAt) return { session: { ...entry.session } };
 
     const terminalBinding: TerminalBinding = {};
-    if (event.windowId) terminalBinding.vscodeWindowId = event.windowId;
     if (event.terminalRef) terminalBinding.terminalRef = event.terminalRef;
     if (event.terminalPid !== undefined) terminalBinding.terminalPid = event.terminalPid;
     if (event.captureState) terminalBinding.terminalCaptureState = event.captureState;
@@ -193,17 +210,35 @@ export class SessionManager extends EventEmitter {
       return { session: { ...entry.session } };
     }
 
+    if (entry.session.status === 'paused' && update.status !== 'running') {
+      entry.lastTerminalUpdateAt = event.occurredAt;
+      if (bindingChanged) this.emitUpdateDebounced();
+      return { session: { ...entry.session } };
+    }
+
     const session = this.applyTerminalUpdate(entry, update);
     if (bindingChanged) this.emitUpdateDebounced();
     return { session, statusUpdate: update };
   }
 
-  bindSessionToVsCodeWindow(id: string, windowId: string): Session | null {
+  pauseSession(id: string): Session | null {
     const entry = this.sessions.get(id);
     if (!entry) return null;
+    if (entry.session.status === 'paused') return { ...entry.session };
+    if (
+      entry.session.status === 'error' ||
+      entry.session.status === 'stopped' ||
+      entry.session.status === 'detached'
+    ) {
+      return { ...entry.session };
+    }
 
-    const windowOwnerChanged = this.updateSessionTerminalBinding(entry, { vscodeWindowId: windowId });
-    if (windowOwnerChanged) this.emitUpdateDebounced();
+    const now = Date.now();
+    entry.session.status = 'paused';
+    entry.session.lastActivity = now;
+    entry.statusChangedAt = now;
+    entry.lastEffectiveUpdateAt = now;
+    this.emit('sessionUpdate', this.getSessions());
     return { ...entry.session };
   }
 
@@ -241,16 +276,39 @@ export class SessionManager extends EventEmitter {
     return { ...entry.session };
   }
 
+  setClientMetadata(id: string, metadata: ClientMetadata | null): Session | null {
+    const entry = this.sessions.get(id);
+    if (!entry) return null;
+    if (metadata === null) {
+      if (entry.session.clientMetadata !== undefined) {
+        delete entry.session.clientMetadata;
+        this.emit('sessionUpdate', this.getSessions());
+      }
+      return { ...entry.session };
+    }
+    const prev = entry.session.clientMetadata;
+    const changed =
+      !prev ||
+      prev.kind !== metadata.kind ||
+      prev.workspace !== metadata.workspace ||
+      prev.ipcHook !== metadata.ipcHook ||
+      prev.pid !== metadata.pid ||
+      prev.version !== metadata.version ||
+      prev.termProgram !== metadata.termProgram;
+    if (changed) {
+      entry.session.clientMetadata = { ...metadata };
+      this.emit('sessionUpdate', this.getSessions());
+    }
+    return { ...entry.session };
+  }
+
   private restoreDetachedSessionFromTerminalEvent(entry: SessionEntry, event: TerminalEvent): boolean {
     if (event.type === 'terminal_closed' || event.type === 'terminal_disconnected') return false;
 
-    const eventWindowId = event.windowId?.trim();
-    const sessionWindowId = entry.session.vscodeWindowId?.trim();
     const eventTerminalRef = event.terminalRef?.trim();
     const sessionTerminalRef = entry.session.terminalRef?.trim();
-    const windowMatches = Boolean(eventWindowId && sessionWindowId && eventWindowId === sessionWindowId);
     const terminalMatches = Boolean(eventTerminalRef && sessionTerminalRef && eventTerminalRef === sessionTerminalRef);
-    if (!windowMatches && !terminalMatches) return false;
+    if (!terminalMatches) return false;
 
     entry.session.status = INITIAL_SESSION_STATUS;
     entry.statusChangedAt = event.occurredAt;
@@ -262,11 +320,6 @@ export class SessionManager extends EventEmitter {
 
   private updateSessionTerminalBinding(entry: SessionEntry, binding: TerminalBinding): boolean {
     let changed = false;
-    const normalizedWindowId = binding.vscodeWindowId?.trim();
-    if (normalizedWindowId && entry.session.vscodeWindowId !== normalizedWindowId) {
-      entry.session.vscodeWindowId = normalizedWindowId;
-      changed = true;
-    }
 
     const normalizedTerminalRef = binding.terminalRef?.trim();
     if (normalizedTerminalRef && entry.session.terminalRef !== normalizedTerminalRef) {

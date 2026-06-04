@@ -35,7 +35,6 @@ export function parseTerminalEventRequest(payload: unknown): TerminalEvent | nul
 
   const terminalRef = readStringField(record, 'terminalRef').trim();
   const launchId = readStringField(record, 'launchId').trim();
-  const windowId = readStringField(record, 'windowId').trim();
   const terminalPid = readOptionalNumberField(record, 'terminalPid');
   const terminalName = readStringField(record, 'terminalName').trim();
   const terminalCwd = readStringField(record, 'terminalCwd').trim();
@@ -45,7 +44,6 @@ export function parseTerminalEventRequest(payload: unknown): TerminalEvent | nul
     explicitTaskId,
     terminalRef,
     launchId,
-    windowId,
     terminalPid,
     terminalName,
     terminalCwd,
@@ -55,7 +53,6 @@ export function parseTerminalEventRequest(payload: unknown): TerminalEvent | nul
   const event: TerminalEvent = { id, type: rawType, occurredAt };
   if (terminalRef) event.terminalRef = terminalRef;
   if (launchId) event.launchId = launchId;
-  if (windowId) event.windowId = windowId;
   if (terminalPid !== undefined) event.terminalPid = terminalPid;
   if (terminalName) event.terminalName = terminalName;
   if (terminalCwd) event.terminalCwd = terminalCwd;
@@ -79,7 +76,6 @@ export function parseTerminalEventRequest(payload: unknown): TerminalEvent | nul
   const captureReason = readStringField(record, 'captureReason').trim();
   if (captureReason) event.captureReason = captureReason.slice(0, 500);
   rememberTaskTerminalBinding(id, {
-    vscodeWindowId: windowId,
     terminalRef,
     terminalPid,
     captureState: event.captureState,
@@ -121,7 +117,6 @@ export function findSessionForTerminalIdentity(identity: TerminalEventIdentity):
   if (!normalizedTerminalPath) return null;
   return sessions.find(session =>
     !session.terminalRef?.trim() &&
-    (!identity.windowId || !session.vscodeWindowId || session.vscodeWindowId === identity.windowId) &&
     normalizePathForCompare(session.cwd) === normalizedTerminalPath
   ) ?? null;
 }

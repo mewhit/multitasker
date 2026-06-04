@@ -10,7 +10,6 @@ import { saveSessions } from '../../../desktop/settings';
 import { MAX_PENDING_TERMINAL_EVENTS_PER_SESSION, DEBUG_LOG_DIRECTORY, DEBUG_LOG_FILE_EXTENSION, isTerminalUpdateDebugEnabled } from '../../core/constants';
 import { getErrorMessage, formatDebugValue } from '../../core/util';
 import { getSessionsStateToSave } from '../sessions/parse';
-import { rememberVsCodeWindow } from '../vscode/windows';
 
 export function handleTerminalUpdate(update: TerminalUpdate): void {
   if (removedSessionIds.has(update.id)) {
@@ -27,7 +26,6 @@ export function handleTerminalEvent(event: TerminalEvent): void {
     debugTerminalUpdate('terminal event ignored for removed session', terminalEventDebugDetails(event, event.terminalName));
     return;
   }
-  if (event.windowId) rememberVsCodeWindow({ windowId: event.windowId });
   debugTerminalUpdate('terminal event received', terminalEventDebugDetails(event, getTerminalEventSessionName(event)));
   if (applyTerminalEvent(event)) return;
   debugTerminalUpdate('terminal event queued for missing session', terminalEventDebugDetails(event, getTerminalEventSessionName(event)));
@@ -130,7 +128,6 @@ export function forgetRemovedSession(id: string): void {
 export function rememberTaskTerminalBinding(
   taskId: string,
   binding: {
-    vscodeWindowId?: string | undefined;
     terminalRef?: string | undefined;
     terminalPid?: number | undefined;
     captureState?: TerminalCaptureState | undefined;
@@ -142,7 +139,6 @@ export function rememberTaskTerminalBinding(
   if (previousTerminalRef && terminalRef && previousTerminalRef !== terminalRef) taskIdByTerminalRef.delete(previousTerminalRef);
   if (terminalRef) taskIdByTerminalRef.set(terminalRef, taskId);
   sessionManager.bindSessionToTerminal(taskId, buildTerminalBinding({
-    vscodeWindowId: binding.vscodeWindowId,
     terminalRef,
     terminalPid: binding.terminalPid,
     terminalCaptureState: binding.captureState,
@@ -151,15 +147,12 @@ export function rememberTaskTerminalBinding(
 }
 
 export function buildTerminalBinding(binding: {
-  vscodeWindowId?: string | undefined;
   terminalRef?: string | undefined;
   terminalPid?: number | undefined;
   terminalCaptureState?: TerminalCaptureState | undefined;
   terminalCaptureReason?: string | undefined;
 }): TerminalBinding {
   const terminalBinding: TerminalBinding = {};
-  const vscodeWindowId = binding.vscodeWindowId?.trim();
-  if (vscodeWindowId) terminalBinding.vscodeWindowId = vscodeWindowId;
   const terminalRef = binding.terminalRef?.trim();
   if (terminalRef) terminalBinding.terminalRef = terminalRef;
   if (binding.terminalPid !== undefined) terminalBinding.terminalPid = binding.terminalPid;
@@ -170,6 +163,7 @@ export function buildTerminalBinding(binding: {
 }
 
 export function debugTerminalUpdate(message: string, details: Record<string, unknown> = {}): void {
+  if (!isTerminalUpdateDebugEnabled()) return;
   const serializedDetails = Object.entries(details)
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => `${key}=${formatDebugValue(value)}`)
@@ -178,7 +172,7 @@ export function debugTerminalUpdate(message: string, details: Record<string, unk
     serializedDetails ? ` ${serializedDetails}` : ''
   }`;
   appendTerminalDebugLog(line, details);
-  if (isTerminalUpdateDebugEnabled()) console.info(line);
+  console.info(line);
 }
 
 function appendTerminalDebugLog(line: string, details: Record<string, unknown>): void {
@@ -287,7 +281,6 @@ export function terminalEventDebugDetails(event: TerminalEvent, sessionName?: st
     shellType: event.shellType,
     hasLaunchCommand: event.hasLaunchCommand,
     primary: event.primary,
-    windowId: event.windowId,
     captureState: event.captureState,
     captureReason: event.captureReason,
     output: event.output === undefined ? undefined : terminalOutputDebugValue(event.output),

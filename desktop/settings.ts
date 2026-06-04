@@ -42,6 +42,7 @@ export interface GoogleCalendarConnectionState {
   enabled: boolean;
   connectedAt: number;
   lastSyncedAt?: number;
+  authError?: string;
   auth: GoogleCalendarAuthState;
 }
 
@@ -62,6 +63,15 @@ export interface GoogleCalendarEventState {
   updated?: string;
 }
 
+export interface SessionSshOptions {
+  host: string;
+  username: string;
+  port?: number;
+  privateKeyPath?: string;
+  agent?: string;
+  initCommand?: string;
+}
+
 export interface SessionState {
   id?: string;
   name: string;
@@ -69,10 +79,21 @@ export interface SessionState {
   cwd: string;
   shellType: ShellType;
   sshCommand?: string;
-  vscodeWindowId?: string;
+  sshOptions?: SessionSshOptions;
   terminalRef?: string;
   terminalPid?: number;
+  clientMetadata?: PersistedClientMetadata;
+  status?: 'waiting' | 'starting' | 'running' | 'needs_attention' | 'error' | 'stopped' | 'detached';
 }
+
+export type PersistedClientMetadata = {
+  kind: 'vscode';
+  workspace?: string;
+  ipcHook?: string;
+  pid?: number;
+  version?: string;
+  termProgram?: string;
+};
 
 export interface ManualTaskState {
   id: string;
@@ -225,7 +246,7 @@ function normalizeSessionState(value: unknown): SessionState | null {
   const rawCwd = value['cwd'];
   const rawShellType = value['shellType'];
   const rawSshCommand = value['sshCommand'] ?? value['sshHost'];
-  const rawVsCodeWindowId = value['vscodeWindowId'];
+  const rawSshOptions = value['sshOptions'];
   const rawTerminalRef = value['terminalRef'];
   const terminalPid = readFiniteNumber(value, 'terminalPid');
 
@@ -244,25 +265,60 @@ function normalizeSessionState(value: unknown): SessionState | null {
     : path.basename(cwd) || sshCommand || 'Session';
   const cmd = typeof rawCmd === 'string' ? rawCmd : '';
   const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : undefined;
-  const vscodeWindowId = typeof rawVsCodeWindowId === 'string' && rawVsCodeWindowId.trim()
-    ? rawVsCodeWindowId.trim()
-    : undefined;
   const terminalRef = typeof rawTerminalRef === 'string' && rawTerminalRef.trim()
     ? rawTerminalRef.trim()
     : undefined;
+  const sshOptions = normalizeSessionSshOptions(rawSshOptions);
+  const clientMetadata = normalizeClientMetadata(value['clientMetadata']);
   const session = {
     name,
     cmd,
     cwd,
     shellType,
     ...(sshCommand ? { sshCommand } : {}),
-    ...(vscodeWindowId ? { vscodeWindowId } : {}),
+    ...(sshOptions ? { sshOptions } : {}),
     ...(terminalRef ? { terminalRef } : {}),
     ...(terminalPid !== null ? { terminalPid } : {}),
+    ...(clientMetadata ? { clientMetadata } : {}),
   };
 
   if (id) return { id, ...session };
   return session;
+}
+
+function normalizeSessionSshOptions(value: unknown): SessionSshOptions | undefined {
+  if (!isRecord(value)) return undefined;
+  const host = typeof value['host'] === 'string' ? value['host'].trim() : '';
+  const username = typeof value['username'] === 'string' ? value['username'].trim() : '';
+  if (!host || !username) return undefined;
+  const opts: SessionSshOptions = { host, username };
+  const rawPort = value['port'];
+  if (typeof rawPort === 'number' && Number.isFinite(rawPort) && rawPort > 0) opts.port = rawPort;
+  const rawKey = value['privateKeyPath'];
+  if (typeof rawKey === 'string' && rawKey.trim()) opts.privateKeyPath = rawKey.trim();
+  const rawAgent = value['agent'];
+  if (typeof rawAgent === 'string' && rawAgent.trim()) opts.agent = rawAgent.trim();
+  const rawInit = value['initCommand'];
+  if (typeof rawInit === 'string' && rawInit.trim()) opts.initCommand = rawInit.trim();
+  return opts;
+}
+
+export function normalizeClientMetadata(value: unknown): PersistedClientMetadata | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = typeof value['kind'] === 'string' ? value['kind'].trim() : '';
+  if (kind !== 'vscode') return undefined;
+  const meta: PersistedClientMetadata = { kind: 'vscode' };
+  const workspace = value['workspace'];
+  if (typeof workspace === 'string' && workspace.trim()) meta.workspace = workspace.trim();
+  const ipcHook = value['ipcHook'];
+  if (typeof ipcHook === 'string' && ipcHook.trim()) meta.ipcHook = ipcHook.trim();
+  const pid = value['pid'];
+  if (typeof pid === 'number' && Number.isFinite(pid) && pid > 0) meta.pid = pid;
+  const version = value['version'];
+  if (typeof version === 'string' && version.trim()) meta.version = version.trim();
+  const termProgram = value['termProgram'];
+  if (typeof termProgram === 'string' && termProgram.trim()) meta.termProgram = termProgram.trim();
+  return meta;
 }
 
 function normalizeManualTask(value: unknown): ManualTaskState | null {
@@ -445,6 +501,8 @@ function normalizeGoogleCalendarConnection(value: unknown): GoogleCalendarConnec
   if (accountName) connection.accountName = accountName;
   const lastSyncedAt = readFiniteNumber(value, 'lastSyncedAt');
   if (lastSyncedAt !== null) connection.lastSyncedAt = lastSyncedAt;
+  const authError = readTrimmedString(value, 'authError');
+  if (authError) connection.authError = authError;
   return connection;
 }
 

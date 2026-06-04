@@ -28,6 +28,7 @@
     "skipLibCheck": false,
     "types": ["node", "electron"]
   },
-  "include": ["desktop/**/*.ts", "http-server/**/*.ts"],
+  "include": ["desktop/**/*.ts", "http-server/**/*.ts", "shell/**/*.ts", "ws-server/**/*.ts"],
   "exclude": ["node_modules"]
 }
+

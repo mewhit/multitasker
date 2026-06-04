@@ -9,9 +9,11 @@
     "build": "tsc -p tsconfig.json",
     "postbuild": "npm run clean:debug-log",
     "server": "node dist\\http-server\\server.js",
+    "shell": "node scripts\\run-shell.js",
+    "shell:dev": "concurrently -k -n tsc,sup,ws-server -c blue,yellow,magenta \"tsc -w -p tsconfig.json\" \"node scripts\\dev-supervisor.js\" \"node scripts\\dev-shell.js\"",
     "apps:start": "npm run start",
     "apps:dev": "npm run dev",
-    "dev": "concurrently -k \"tsc -w -p tsconfig.json\" \"node scripts\\dev-electron.js\"",
+    "dev": "concurrently -k -n tsc,electron,sup,ws-server -c blue,green,yellow,magenta \"tsc -w -p tsconfig.json\" \"node scripts\\dev-electron.js\" \"node scripts\\dev-supervisor.js\" \"node scripts\\dev-shell.js\"",
     "start": "yarn build && electron ."
   },
   "keywords": [],
@@ -19,6 +21,8 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^25.7.0",
+    "@types/ssh2": "^1.15.5",
+    "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",
     "electron": "^42.0.1",
     "typescript": "^5.9.3",
@@ -26,6 +30,14 @@
   },
   "dependencies": {
     "@slack/web-api": "^7.16.0",
-    "node-window-manager": "^2.2.4"
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "1.2.0-beta.13",
+    "node-window-manager": "^2.2.4",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.0"
   }
 }

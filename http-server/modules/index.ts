@@ -7,10 +7,8 @@ import { googleCalendarModule } from './google-calendar';
 import { manualTasksModule } from './manual-tasks';
 import { recurringTasksModule } from './recurring-tasks';
 import { githubReviewsModule } from './github-reviews';
-import { vscodeModule } from './vscode';
 import { terminalsModule } from './terminals';
 import { sessionsModule } from './sessions';
-import { deepLinksModule } from './deep-links';
 import { slackModule } from './slack';
 
 export const modules: HttpModule[] = [
@@ -22,9 +20,7 @@ export const modules: HttpModule[] = [
   manualTasksModule,
   recurringTasksModule,
   githubReviewsModule,
-  vscodeModule,
   terminalsModule,
   sessionsModule,
-  deepLinksModule,
   slackModule,
 ];

@@ -11,12 +11,11 @@ export interface Session {
   cwd: string;
   shellType: ShellType;
   sshCommand?: string;
-  status: 'waiting' | 'starting' | 'running' | 'needs_attention' | 'error' | 'stopped' | 'detached';
+  status: 'waiting' | 'starting' | 'running' | 'needs_attention' | 'paused' | 'error' | 'stopped' | 'detached';
   lastActivity: number;
   gitChanges: boolean;
   terminalExitCode?: number;
   terminalExitReason?: string;
-  vscodeWindowId?: string;
   terminalRef?: string;
   terminalPid?: number;
   terminalCaptureState?: TerminalCaptureState;
@@ -84,6 +83,7 @@ export interface GoogleCalendarConnectionStatus {
   enabled: boolean;
   connectedAt: number;
   lastSyncedAt?: number;
+  authError?: string;
 }
 
 export interface GoogleCalendarAuthResult {
@@ -99,18 +99,6 @@ export interface SessionState {
   cwd: string;
   shellType: ShellType;
   sshCommand?: string;
-  terminalRef?: string;
-  terminalPid?: number;
-}
-
-export interface VsCodeSessionRequest {
-  id: string;
-  name: string;
-  cmd: string;
-  cwd: string;
-  shellType: ShellType;
-  sshCommand?: string;
-  vscodeWindowId?: string;
   terminalRef?: string;
   terminalPid?: number;
 }
@@ -167,17 +155,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createSession: (name: string, cmd: string, cwd: string, shellType: ShellType, sshCommand = ''): Promise<Session | null> =>
     ipcRenderer.invoke('session:create', name, cmd, cwd, shellType, sshCommand),
 
+  createShellPty: (cwd?: string, name?: string): Promise<Session | null> =>
+    ipcRenderer.invoke('shell:create-pty', cwd, name),
+
+  createShellSsh: (opts: { host: string; username: string; port?: number; privateKeyPath?: string; passphrase?: string; agent?: string; initCommand?: string; name?: string }): Promise<Session | null> =>
+    ipcRenderer.invoke('shell:create-ssh', opts),
+
+  reconnectShellSsh: (sessionId: string): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('shell:reconnect-ssh', sessionId),
+
+  focusVscode: (sessionId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('shell:focus-vscode', sessionId),
+
+  getShellServerConfig: (): Promise<{ url: string; token: string }> =>
+    ipcRenderer.invoke('shell:get-config'),
+
   removeSession: (id: string): Promise<void> =>
     ipcRenderer.invoke('session:remove', id),
+
+  pauseSession: (id: string): Promise<Session | null> =>
+    ipcRenderer.invoke('session:pause', id),
 
   renameSession: (id: string, name: string): Promise<Session | null> =>
     ipcRenderer.invoke('session:rename', id, name),
 
   openReview: (cwd: string): Promise<void> =>
     ipcRenderer.invoke('session:open-review', cwd),
-
-  openVsCode: (session: VsCodeSessionRequest): Promise<boolean> =>
-    ipcRenderer.invoke('editor:open-vscode', session),
 
   pickDirectory: (): Promise<string | null> =>
     ipcRenderer.invoke('session:pick-dir'),
@@ -187,10 +190,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   onListUpdate: (cb: (sessions: Session[]) => void): void => {
     ipcRenderer.on('session:list-update', (_event, sessions: Session[]) => cb(sessions));
-  },
-
-  onVsCodeFocusFailed: (cb: (payload: { id: string; message: string; reason: string }) => void): void => {
-    ipcRenderer.on('editor:vscode-focus-failed', (_event, payload: { id: string; message: string; reason: string }) => cb(payload));
   },
 
   getManualTasks: (): Promise<ManualTask[]> =>

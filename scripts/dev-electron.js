@@ -7,7 +7,7 @@ const electronPath = require('electron');
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.join(projectRoot, 'dist');
 const mainFile = path.join(distDir, 'desktop', 'main.js');
-const rendererFile = path.join(projectRoot, 'index.html');
+const rendererFile = path.join(projectRoot, 'desktop', 'index.html');
 const restartDebounceMs = 500;
 const mainFileCheckMs = 250;
 const gracefulShutdownMs = 3000;
@@ -16,7 +16,7 @@ let electronProcess = null;
 let restartTimer = null;
 let restarting = false;
 let shuttingDown = false;
-let distWatcher = null;
+const distWatchers = new Map();
 let rendererWatcher = null;
 
 function log(message) {
@@ -92,17 +92,48 @@ function restartElectron(reason) {
 }
 
 function watchDist() {
-  distWatcher = fs.watch(distDir, { recursive: true }, (_eventType, fileName) => {
-    if (!fileName) {
-      scheduleRestart('dist');
-      return;
+  const watchedDirs = [
+    path.join(distDir, 'desktop'),
+    // Electron spawns the http-server (see BACKEND_SERVER_SCRIPT_RELATIVE_PATH
+    // in desktop/main.ts). When http-server code changes we need a full
+    // Electron restart to respawn it with the new code — otherwise IPC
+    // routes, persistence handlers, etc. stay stale.
+    path.join(distDir, 'http-server'),
+  ];
+  for (const dir of watchedDirs) {
+    if (!fs.existsSync(dir)) {
+      log(`waiting for ${path.relative(projectRoot, dir)}...`);
     }
-
-    const changedFile = String(fileName);
-    if (changedFile.endsWith('.js') || changedFile.endsWith('.json')) {
-      scheduleRestart(path.join('dist', changedFile));
+  }
+  // Shell server files live under dist/shell/{supervisor,gateway,core,ipc}
+  // and are owned by dev-supervisor.js / dev-shell.js — restarting Electron
+  // on those changes would tear down the renderer (and any in-flight
+  // terminal input) for no reason.
+  const ensureWatchers = () => {
+    for (const dir of watchedDirs) {
+      if (distWatchers.has(dir)) continue;
+      if (!fs.existsSync(dir)) continue;
+      const label = path.relative(distDir, dir).replace(/\\/g, '/');
+      const w = fs.watch(dir, { recursive: true }, (_eventType, fileName) => {
+        if (!fileName) {
+          scheduleRestart(`dist/${label}`);
+          return;
+        }
+        const changedFile = String(fileName);
+        if (changedFile.endsWith('.js') || changedFile.endsWith('.json')) {
+          scheduleRestart(path.join('dist', label, changedFile));
+        }
+      });
+      distWatchers.set(dir, w);
     }
-  });
+  };
+  ensureWatchers();
+  if (distWatchers.size < watchedDirs.length) {
+    const retry = setInterval(() => {
+      ensureWatchers();
+      if (distWatchers.size >= watchedDirs.length) clearInterval(retry);
+    }, mainFileCheckMs);
+  }
 }
 
 function watchRenderer() {
@@ -113,9 +144,11 @@ function watchRenderer() {
 }
 
 function closeWatchers() {
-  distWatcher?.close();
+  for (const w of distWatchers.values()) {
+    try { w.close(); } catch { /* ignore */ }
+  }
+  distWatchers.clear();
   rendererWatcher?.close();
-  distWatcher = null;
   rendererWatcher = null;
 }
 

@@ -18,21 +18,7 @@ export const terminalsModule: HttpModule = {
       },
       {
         method: 'POST',
-        path: '/extensions/vscode/terminal-updates',
-        handler({ payload, response }) {
-          handleTerminalUpdatePost(payload, response);
-        },
-      },
-      {
-        method: 'POST',
         path: '/terminal-event',
-        handler({ payload, response }) {
-          handleTerminalEventPost(payload, response);
-        },
-      },
-      {
-        method: 'POST',
-        path: '/extensions/vscode/terminal-events',
         handler({ payload, response }) {
           handleTerminalEventPost(payload, response);
         },
@@ -47,30 +33,44 @@ function handleTerminalUpdatePost(payload: unknown, response: import('http').Ser
     writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_update' });
     return;
   }
+  // Always broadcast SSE event for Electron UI
+  broadcastSseEvent('terminal:update', update);
+  // Also handle backend state if needed
   if (shouldBackendOwnState()) {
     handleTerminalUpdate(update);
-  } else {
-    broadcastSseEvent('terminal:update', update);
   }
   writeJsonResponse(response, 200, { ok: true });
 }
 
 function handleTerminalEventPost(payload: unknown, response: import('http').ServerResponse): void {
-  if (shouldBackendOwnState()) {
-    const event = parseTerminalEventRequest(payload);
-    if (!event) {
-      writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_event' });
+  // High-frequency events (terminal_output emitted at every spinner frame,
+  // visibility/interaction events that just re-trigger status detection) are
+  // now ignored here: the shell-server gateway already runs a snapshot-based
+  // output analyzer and POSTs authoritative status changes to
+  // /api/shell/agent-status. Processing them again would just re-run the
+  // legacy AGENT_PROFILES regex stack per chunk and bog down the backend
+  // event loop — which is exactly what made Codex CLI feel laggy.
+  if (typeof payload === 'object' && payload !== null) {
+    const t = (payload as Record<string, unknown>)['type'];
+    if (t === 'terminal_output' || t === 'terminal_visible' || t === 'terminal_interacted') {
+      writeJsonResponse(response, 200, { ok: true, skipped: true });
       return;
     }
-    handleTerminalEvent(event);
-    writeJsonResponse(response, 200, { ok: true });
-    return;
   }
 
-  if (!isTerminalEventRelayPayload(payload)) {
+  const event = parseTerminalEventRequest(payload);
+  if (!event) {
     writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_event' });
     return;
   }
-  broadcastSseEvent('terminal:event', payload);
+
+  // Always broadcast SSE event for Electron UI
+  if (isTerminalEventRelayPayload(payload)) {
+    broadcastSseEvent('terminal:event', payload);
+  }
+  // Also handle backend state if needed
+  if (shouldBackendOwnState()) {
+    handleTerminalEvent(event);
+  }
   writeJsonResponse(response, 200, { ok: true });
 }

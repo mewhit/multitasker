@@ -10,8 +10,8 @@ const node_child_process_1 = require("node:child_process");
 const node_crypto_1 = require("node:crypto");
 const node_http_1 = require("node:http");
 const web_api_1 = require("@slack/web-api");
-const node_window_manager_1 = require("node-window-manager");
 const sessionManager_1 = require("./sessionManager");
+const shellServerClient_1 = require("./shellServerClient");
 const settings_1 = require("./settings");
 const WINDOW_WIDTH = 1280;
 const WINDOW_HEIGHT = 800;
@@ -19,24 +19,13 @@ const WINDOW_MIN_WIDTH = 960;
 const WINDOW_MIN_HEIGHT = 600;
 const WINDOW_STATE_SAVE_DEBOUNCE_MS = 500;
 const MIN_VISIBLE_WINDOW_AREA = 100;
-const VSCODE_COMPANION_START_URI = 'vscode://multitasker.vscode-companion/start';
-const MULTITASKER_PROTOCOL = 'multitasker';
-const MULTITASKER_CREATE_PATH = '/create';
-const MULTITASKER_TERMINAL_PATH = '/terminal';
 const TERMINAL_UPDATE_HOST = '127.0.0.1';
 const TERMINAL_UPDATE_PORT = 39017;
 const TERMINAL_UPDATE_PATH = '/terminal-update';
 const TERMINAL_EVENT_PATH = '/terminal-event';
-const VSCODE_WINDOW_PATH = '/vscode-window';
-const VSCODE_COMMAND_PATH = '/vscode-command';
 const SLACK_EVENT_PATH = '/slack-event';
 const SLACK_NOTIFICATION_PATH = '/slack-notification';
 const SLACK_NOTIFICATION_DISMISS_PATH = '/slack-notification-dismiss';
-const EXTENSION_VSCODE_TERMINAL_UPDATE_PATH = '/extensions/vscode/terminal-updates';
-const EXTENSION_VSCODE_TERMINAL_EVENT_PATH = '/extensions/vscode/terminal-events';
-const EXTENSION_VSCODE_WINDOW_PATH = '/extensions/vscode/windows';
-const EXTENSION_VSCODE_COMMAND_PATH = '/extensions/vscode/commands';
-const EXTENSION_VSCODE_TASKS_PATH = '/extensions/vscode/tasks';
 const EXTENSION_SLACK_EVENT_PATH = '/extensions/slack/events';
 const EXTENSION_SLACK_NOTIFICATION_PATH = '/extensions/slack/notifications';
 const EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH = '/extensions/slack/notification-dismiss';
@@ -48,7 +37,6 @@ const BACKEND_START_TIMEOUT_MS = 5000;
 const BACKEND_HEALTH_POLL_MS = 100;
 const BACKEND_EVENT_RECONNECT_MS = 1000;
 const LEGACY_IN_PROCESS_BACKEND_ENV = 'MULTITASKER_USE_IN_PROCESS_BACKEND';
-const BACKEND_OWNS_STATE_ENV = 'MULTITASKER_BACKEND_OWNS_STATE';
 const MAX_TERMINAL_EVENT_BODY_BYTES = 512 * 1024;
 const MAX_MANUAL_TASKS = 200;
 const MAX_MANUAL_TASK_TEXT_LENGTH = 4000;
@@ -58,10 +46,6 @@ const MAX_SLACK_NOTIFICATIONS = 100;
 const MAX_SLACK_TEXT_LENGTH = 4000;
 const MAX_SLACK_DEBUG_TEXT_LENGTH = 700;
 const MAX_PENDING_TERMINAL_EVENTS_PER_SESSION = 200;
-const MAX_PENDING_VSCODE_COMMANDS_PER_WINDOW = 50;
-const VSCODE_WINDOW_FOCUS_AFTER_DEEPLINK_DELAY_MS = 1000;
-const VSCODE_COMMAND_LONG_POLL_TIMEOUT_MS = 25000;
-const MAX_VSCODE_FOCUS_CANDIDATES_IN_LOG = 5;
 const DEBUG_LOG_DIRECTORY = 'debug-log';
 const DEBUG_LOG_FILE_EXTENSION = '.log';
 const TERMINAL_UPDATE_DEBUG_ENV = 'MULTITASKER_DEBUG_TERMINAL';
@@ -99,18 +83,11 @@ let backendEventBuffer = '';
 let backendAvailable = false;
 let isQuitting = false;
 let windowStateSaveTimer = null;
-const pendingDeepLinks = [];
 const pendingTerminalUpdates = new Map();
 const pendingTerminalEvents = new Map();
-const removedSessionIds = new Set();
-const vscodeWindowsById = new Map();
 const taskIdByTerminalRef = new Map();
-const pendingLaunchTaskIdByLaunchId = new Map();
-const pendingVsCodeCommandsByWindowId = new Map();
-const pendingVsCodeCommandPollsByWindowId = new Map();
 const terminalDebugLogFileBySessionId = new Map();
 const reportedDebugLogWriteFailures = new Set();
-const cachedVsCodeWindowHandlesByWindowId = new Map();
 const manualTasks = [];
 const recurringTasks = [];
 const slackNotifications = [];
@@ -120,7 +97,6 @@ const backendState = {
     manualTasks,
     recurringTasks,
     slackNotifications,
-    vscodeWindows: [],
 };
 const slackUserNameById = new Map();
 const slackBotNameById = new Map();
@@ -190,189 +166,11 @@ function readOptionalBooleanField(record, key) {
     const value = record[key];
     return typeof value === 'boolean' ? value : undefined;
 }
-function readStringArrayField(record, key) {
-    const value = record[key];
-    if (!Array.isArray(value))
-        return [];
-    return value
-        .filter((item) => typeof item === 'string')
-        .map(item => item.trim())
-        .filter(item => item.length > 0);
-}
 class HttpBodyTooLargeError extends Error {
     constructor(message) {
         super(message);
         this.name = 'HttpBodyTooLargeError';
     }
-}
-function buildVsCodeCompanionUri(session) {
-    const launchId = (0, node_crypto_1.randomUUID)();
-    pendingLaunchTaskIdByLaunchId.set(launchId, session.id);
-    return buildVsCodeCompanionUriWithLaunchId(session, launchId);
-}
-function buildVsCodeCompanionUriWithLaunchId(session, launchId) {
-    const payload = {
-        launchId,
-        name: session.name,
-        cwd: session.cwd,
-        command: session.cmd,
-        shellType: session.shellType,
-        sshCommand: session.sshCommand ?? '',
-    };
-    return `${VSCODE_COMPANION_START_URI}?payload=${encodeURIComponent(JSON.stringify(payload))}`;
-}
-async function openSessionInVsCode(session) {
-    debugTerminalUpdate('vscode open requested', getVsCodeOpenDebugDetails(session));
-    try {
-        const bindingStatus = getVsCodeBindingStatus(session);
-        if (bindingStatus === 'stale') {
-            debugTerminalUpdate('vscode open stopped; session detached', getVsCodeOpenDebugDetails(session));
-            return false;
-        }
-        if (bindingStatus === 'valid' || bindingStatus === 'unverified') {
-            let didRequestWindowFocus = false;
-            if (canFocusRegisteredVsCodeWindow(session)) {
-                didRequestWindowFocus = await focusRegisteredVsCodeWindow(session);
-            }
-            else {
-                debugTerminalUpdate('vscode window OS focus skipped; missing exact process id', getVsCodeOpenDebugDetails(session));
-            }
-            const didQueueTerminalFocus = queueFocusTerminalCommand(session);
-            return didRequestWindowFocus || didQueueTerminalFocus;
-        }
-        debugTerminalUpdate('vscode binding unavailable; using companion deeplink', getVsCodeOpenDebugDetails(session));
-        const companionUri = buildVsCodeCompanionUri(session);
-        debugTerminalUpdate('vscode companion deeplink requested', getVsCodeOpenDebugDetails(session, {
-            companionUri: redactVsCodeCompanionUri(companionUri),
-        }));
-        await electron_1.shell.openExternal(companionUri);
-        debugTerminalUpdate('vscode companion deeplink completed', getVsCodeOpenDebugDetails(session));
-        scheduleVsCodeWindowFocus(session);
-        return true;
-    }
-    catch (err) {
-        debugTerminalUpdate('vscode open failed', getVsCodeOpenDebugDetails(session, { error: getErrorMessage(err) }));
-        console.error('Failed to open VS Code:', getErrorMessage(err));
-        return false;
-    }
-}
-function getVsCodeBindingStatus(session) {
-    const windowId = session.vscodeWindowId?.trim();
-    if (!windowId)
-        return 'none';
-    const windowEntry = vscodeWindowsById.get(windowId);
-    if (!windowEntry) {
-        if (session.terminalRef?.trim()) {
-            debugTerminalUpdate('vscode binding unverified; waiting for registered window with persisted terminal ref', getVsCodeOpenDebugDetails(session, {
-                windowId,
-            }));
-            return 'unverified';
-        }
-        return 'none';
-    }
-    const reboundSession = bindSessionToMatchingVsCodeTerminal(session, windowEntry);
-    if (reboundSession?.terminalRef)
-        return 'valid';
-    if (windowEntry.terminals === undefined) {
-        debugTerminalUpdate('vscode binding unverified; window has not reported terminals yet', getVsCodeOpenDebugDetails(session, {
-            windowId,
-            workspaceFolder: windowEntry.workspaceFolder,
-            workspaceName: windowEntry.workspaceName,
-        }));
-        return 'unverified';
-    }
-    return 'none';
-}
-function bindSessionToMatchingVsCodeTerminal(session, windowEntry) {
-    const match = findMatchingVsCodeTerminal(session, windowEntry);
-    if (!match)
-        return null;
-    const { terminal } = match;
-    const reboundSession = sessionManager?.bindSessionToTerminal(session.id, buildTerminalBinding({
-        vscodeWindowId: windowEntry.windowId,
-        terminalRef: terminal.terminalRef,
-        terminalPid: terminal.terminalPid,
-        terminalCaptureState: terminal.captureState,
-        terminalCaptureReason: terminal.captureReason,
-    })) ?? null;
-    if (!reboundSession)
-        return null;
-    rememberTaskTerminalBinding(reboundSession.id, {
-        vscodeWindowId: windowEntry.windowId,
-        terminalRef: terminal.terminalRef,
-        terminalPid: terminal.terminalPid,
-        captureState: terminal.captureState,
-        captureReason: terminal.captureReason,
-    });
-    debugTerminalUpdate('session bound to vscode terminal', getVsCodeOpenDebugDetails(reboundSession, {
-        terminalRef: terminal.terminalRef,
-        terminalPid: terminal.terminalPid,
-        terminalName: terminal.terminalName,
-        terminalCwd: terminal.terminalCwd,
-        windowId: windowEntry.windowId,
-        matchReason: match.reason,
-        matchScore: match.score,
-    }));
-    return reboundSession;
-}
-function findMatchingVsCodeTerminal(session, windowEntry) {
-    const terminals = windowEntry.terminals ?? [];
-    if (terminals.length === 0)
-        return null;
-    const sessionTerminalRef = session.terminalRef?.trim();
-    if (sessionTerminalRef) {
-        const exactRefMatch = terminals.find(terminal => terminal.terminalRef === sessionTerminalRef);
-        if (exactRefMatch)
-            return { terminal: exactRefMatch, reason: 'exact terminalRef' };
-    }
-    const sessionTerminalPid = session.terminalPid ?? getLegacyAttachedTerminalPid(session.id);
-    if (sessionTerminalPid !== undefined) {
-        const exactPidMatch = terminals.find(terminal => terminal.terminalPid === sessionTerminalPid);
-        if (exactPidMatch)
-            return { terminal: exactPidMatch, reason: 'exact terminalPid' };
-    }
-    if (sessionTerminalRef) {
-        debugTerminalUpdate('vscode terminal match skipped; session already has terminalRef', getVsCodeOpenDebugDetails(session, {
-            windowId: windowEntry.windowId,
-            terminalRef: sessionTerminalRef,
-        }));
-        return null;
-    }
-    const normalizedSessionPath = normalizePathForCompare(session.cwd);
-    const sessionName = session.name.trim().toLowerCase();
-    const scored = terminals
-        .map(terminal => ({
-        terminal,
-        score: scoreTerminalMatch(terminal, normalizedSessionPath, sessionName),
-    }))
-        .filter(candidate => candidate.score > 0)
-        .sort((a, b) => b.score - a.score);
-    const bestMatch = scored[0];
-    if (!bestMatch)
-        return null;
-    const tiedMatches = scored.filter(candidate => candidate.score === bestMatch.score);
-    if (tiedMatches.length > 1) {
-        debugTerminalUpdate('vscode terminal match skipped; ambiguous fallback candidates', getVsCodeOpenDebugDetails(session, {
-            windowId: windowEntry.windowId,
-            matchScore: bestMatch.score,
-            candidateCount: tiedMatches.length,
-            candidateTerminalRefs: tiedMatches.map(candidate => candidate.terminal.terminalRef),
-            candidateTerminalNames: tiedMatches.map(candidate => candidate.terminal.terminalName ?? ''),
-            candidateTerminalCwds: tiedMatches.map(candidate => candidate.terminal.terminalCwd ?? ''),
-        }));
-        return null;
-    }
-    return { terminal: bestMatch.terminal, reason: 'unique cwd/name fallback', score: bestMatch.score };
-}
-function scoreTerminalMatch(terminal, normalizedSessionPath, sessionName) {
-    let score = 0;
-    const terminalPath = normalizePathForCompare(terminal.terminalCwd ?? '');
-    const terminalName = (terminal.terminalName ?? '').trim().toLowerCase();
-    if (normalizedSessionPath && terminalPath && normalizedSessionPath === terminalPath)
-        score += 4;
-    if (sessionName && terminalName && (terminalName === sessionName || terminalName.includes(sessionName)))
-        score += 2;
-    return score;
 }
 function normalizePathForCompare(value) {
     const trimmed = value.trim();
@@ -396,7 +194,6 @@ function rememberTaskTerminalBinding(taskId, binding) {
     if (terminalRef)
         taskIdByTerminalRef.set(terminalRef, taskId);
     sessionManager?.bindSessionToTerminal(taskId, buildTerminalBinding({
-        vscodeWindowId: binding.vscodeWindowId,
         terminalRef,
         terminalPid: binding.terminalPid,
         terminalCaptureState: binding.captureState,
@@ -405,9 +202,6 @@ function rememberTaskTerminalBinding(taskId, binding) {
 }
 function buildTerminalBinding(binding) {
     const terminalBinding = {};
-    const vscodeWindowId = binding.vscodeWindowId?.trim();
-    if (vscodeWindowId)
-        terminalBinding.vscodeWindowId = vscodeWindowId;
     const terminalRef = binding.terminalRef?.trim();
     if (terminalRef)
         terminalBinding.terminalRef = terminalRef;
@@ -419,216 +213,6 @@ function buildTerminalBinding(binding) {
     if (terminalCaptureReason)
         terminalBinding.terminalCaptureReason = terminalCaptureReason;
     return terminalBinding;
-}
-function focusRegisteredVsCodeWindow(session) {
-    return focusVsCodeWindow(session);
-}
-function canFocusRegisteredVsCodeWindow(session) {
-    const windowId = session.vscodeWindowId?.trim();
-    const windowEntry = windowId ? vscodeWindowsById.get(windowId) : undefined;
-    return typeof windowEntry?.pid === 'number' ||
-        Boolean((windowEntry?.workspaceFolder ?? session.cwd).trim());
-}
-function scheduleVsCodeWindowFocus(session) {
-    if (process.platform !== 'win32')
-        return;
-    setTimeout(() => {
-        void focusVsCodeWindow(session);
-    }, VSCODE_WINDOW_FOCUS_AFTER_DEEPLINK_DELAY_MS);
-}
-async function focusVsCodeWindow(session) {
-    if (process.platform !== 'win32')
-        return Promise.resolve(false);
-    const details = getWindowsVsCodeFocusDetails(session);
-    try {
-        const response = focusWindowsVsCodeWindow(details);
-        if (!response.ok) {
-            const error = response.error ?? 'no matching VS Code window';
-            debugTerminalUpdate('vscode window OS focus failed', getVsCodeOpenDebugDetails(session, {
-                windowId: details.windowId,
-                error,
-                fromCache: response.fromCache,
-            }));
-            notifyVsCodeFocusFailed(session, error);
-            return false;
-        }
-        debugTerminalUpdate('vscode window OS focus completed', getVsCodeOpenDebugDetails(session, {
-            windowId: details.windowId,
-            result: response.title ?? '',
-            handle: response.handle,
-            pid: response.pid,
-            fromCache: response.fromCache,
-        }));
-        return true;
-    }
-    catch (error) {
-        const message = getErrorMessage(error);
-        debugTerminalUpdate('vscode window OS focus failed', getVsCodeOpenDebugDetails(session, {
-            windowId: details.windowId,
-            error: message,
-        }));
-        notifyVsCodeFocusFailed(session, message);
-        return false;
-    }
-}
-function focusWindowsVsCodeWindow(details) {
-    const cacheKey = details.windowId.trim();
-    const cachedCandidate = getCachedVsCodeWindowCandidate(cacheKey, details);
-    if (cachedCandidate && isStrongVsCodeWindowCandidate(cachedCandidate)) {
-        focusManagedWindow(cachedCandidate.window);
-        return buildWindowsVsCodeFocusSuccess(cachedCandidate, true);
-    }
-    if (cacheKey)
-        cachedVsCodeWindowHandlesByWindowId.delete(cacheKey);
-    let bestCandidate = null;
-    const candidates = [];
-    for (const managedWindow of node_window_manager_1.windowManager.getWindows()) {
-        const candidate = buildVsCodeWindowCandidate(managedWindow, details);
-        if (!candidate)
-            continue;
-        candidates.push(candidate);
-        if (isStrongVsCodeWindowCandidate(candidate) &&
-            (bestCandidate === null || candidate.score > bestCandidate.score)) {
-            bestCandidate = candidate;
-        }
-    }
-    if (bestCandidate === null) {
-        return {
-            ok: false,
-            error: `no matching VS Code window${formatVsCodeWindowCandidates(candidates)}`,
-        };
-    }
-    if (cacheKey)
-        cachedVsCodeWindowHandlesByWindowId.set(cacheKey, bestCandidate.window.id);
-    focusManagedWindow(bestCandidate.window);
-    return buildWindowsVsCodeFocusSuccess(bestCandidate, false);
-}
-function getCachedVsCodeWindowCandidate(cacheKey, details) {
-    if (!cacheKey)
-        return null;
-    const cachedHandle = cachedVsCodeWindowHandlesByWindowId.get(cacheKey);
-    if (cachedHandle === undefined)
-        return null;
-    return buildVsCodeWindowCandidate(new node_window_manager_1.Window(cachedHandle), details);
-}
-function buildVsCodeWindowCandidate(managedWindow, details) {
-    if (!managedWindow.isWindow())
-        return null;
-    const title = managedWindow.getTitle();
-    if (!title || !titleContains(title, 'Visual Studio Code'))
-        return null;
-    if (!isCodeWindowProcess(managedWindow))
-        return null;
-    const processId = managedWindow.processId;
-    const workspaceTitle = getVsCodeWorkspaceTitle(title);
-    const processMatches = details.pid !== undefined && processId === details.pid;
-    const workspaceMatches = workspaceTitleMatches(workspaceTitle, details.workspaceName, getLeaf(details.workspaceFolder));
-    const isStrongMatch = processMatches || workspaceMatches;
-    const isVisible = managedWindow.isVisible();
-    let score = 1;
-    if (processMatches)
-        score += 1000;
-    if (workspaceMatches)
-        score += 300;
-    if (isVisible)
-        score += 5;
-    return {
-        window: managedWindow,
-        title,
-        score,
-        processId,
-        isVisible,
-        isStrongMatch,
-    };
-}
-function isStrongVsCodeWindowCandidate(candidate) {
-    return candidate.isStrongMatch;
-}
-function focusManagedWindow(managedWindow) {
-    managedWindow.show();
-    managedWindow.bringToTop();
-}
-function buildWindowsVsCodeFocusSuccess(candidate, fromCache) {
-    return {
-        ok: true,
-        title: candidate.title,
-        handle: String(candidate.window.id),
-        pid: candidate.processId,
-        fromCache,
-    };
-}
-function formatVsCodeWindowCandidates(candidates) {
-    if (candidates.length === 0)
-        return '';
-    return `; candidates=${candidates
-        .slice(0, MAX_VSCODE_FOCUS_CANDIDATES_IN_LOG)
-        .map(candidate => `#${candidate.processId} ${candidate.title}`)
-        .join(', ')}`;
-}
-function isCodeWindowProcess(managedWindow) {
-    const executablePath = managedWindow.path.trim();
-    if (!executablePath)
-        return false;
-    return node_path_1.default.basename(executablePath, node_path_1.default.extname(executablePath))
-        .toLowerCase()
-        .startsWith('code');
-}
-function titleContains(title, needle) {
-    return needle.trim().length > 0 && title.toLowerCase().includes(needle.toLowerCase());
-}
-function workspaceTitleMatches(workspaceTitle, workspaceName, workspaceLeaf) {
-    return segmentMatches(workspaceTitle, workspaceName) || segmentMatches(workspaceTitle, workspaceLeaf);
-}
-function segmentMatches(segment, expected) {
-    if (!segment.trim() || !expected.trim())
-        return false;
-    const normalizedSegment = segment.trim().toLowerCase();
-    const normalizedExpected = expected.trim().toLowerCase();
-    return normalizedSegment === normalizedExpected || normalizedSegment.includes(normalizedExpected);
-}
-function getVsCodeWorkspaceTitle(title) {
-    const suffix = ' - Visual Studio Code';
-    const suffixIndex = title.toLowerCase().lastIndexOf(suffix.toLowerCase());
-    if (suffixIndex < 0)
-        return '';
-    const beforeSuffix = title.slice(0, suffixIndex);
-    const separatorIndex = beforeSuffix.lastIndexOf(' - ');
-    return separatorIndex >= 0 ? beforeSuffix.slice(separatorIndex + 3).trim() : beforeSuffix.trim();
-}
-function getLeaf(value) {
-    const trimmedValue = value.trim().replace(/[\\\/]+$/, '');
-    if (!trimmedValue)
-        return '';
-    const separatorIndex = Math.max(trimmedValue.lastIndexOf('\\'), trimmedValue.lastIndexOf('/'));
-    return separatorIndex >= 0 ? trimmedValue.slice(separatorIndex + 1) : trimmedValue;
-}
-function getWindowsVsCodeFocusDetails(session) {
-    const windowId = session.vscodeWindowId?.trim();
-    const windowEntry = windowId ? vscodeWindowsById.get(windowId) : undefined;
-    const workspaceFolder = windowEntry?.workspaceFolder ?? session.cwd;
-    const details = {
-        windowId: windowId ?? '',
-        workspaceName: windowEntry?.workspaceName ?? node_path_1.default.basename(workspaceFolder),
-        workspaceFolder,
-        sessionName: session.name,
-    };
-    if (windowEntry?.pid !== undefined)
-        details.pid = windowEntry.pid;
-    return details;
-}
-function notifyVsCodeFocusFailed(session, reason) {
-    const windowId = session.vscodeWindowId?.trim();
-    const windowEntry = windowId ? vscodeWindowsById.get(windowId) : undefined;
-    const missingWindowMetadata = windowEntry?.sessionIds === undefined;
-    const multipleCandidates = reason.includes('candidates=');
-    const message = missingWindowMetadata && multipleCandidates
-        ? 'VS Code focused the terminal, but Windows could not bring the right window forward because this VS Code window has not reported its metadata yet. Reload the VS Code extension/window and click again.'
-        : 'VS Code focused the terminal, but Windows could not bring the VS Code window forward. Check debug-log for the focus failure details.';
-    mainWindow?.webContents.send('editor:vscode-focus-failed', {
-        id: session.id,
-        message,
-        reason,
-    });
 }
 function startSlackAuthFlow() {
     if (slackAuthProcess && slackAuthProcess.exitCode === null && !slackAuthProcess.killed) {
@@ -868,89 +452,6 @@ function unquoteSlackEnvValue(value) {
     }
     return value;
 }
-function getVsCodeOpenDebugDetails(session, extraDetails = {}) {
-    return {
-        id: session.id,
-        sessionName: session.name,
-        cwd: session.cwd,
-        shellType: session.shellType,
-        vscodeWindowId: session.vscodeWindowId,
-        terminalRef: session.terminalRef,
-        terminalPid: session.terminalPid,
-        hasCommand: session.cmd.length > 0,
-        hasSshCommand: Boolean(session.sshCommand?.trim()),
-        ...extraDetails,
-    };
-}
-function queueFocusTerminalCommand(session) {
-    const windowId = session.vscodeWindowId?.trim();
-    const currentSession = sessionManager?.getSession(session.id) ?? session;
-    const terminalRef = currentSession.terminalRef?.trim();
-    if (!windowId || !terminalRef)
-        return false;
-    enqueueVsCodeCommand(windowId, {
-        id: (0, node_crypto_1.randomUUID)(),
-        type: 'focus-terminal',
-        terminalRef,
-    });
-    debugTerminalUpdate('vscode focus terminal command queued', getVsCodeOpenDebugDetails(session, {
-        windowId,
-        terminalRef,
-    }));
-    return true;
-}
-function queueDisconnectSessionCommand(session) {
-    const windowId = session.vscodeWindowId?.trim();
-    const currentSession = sessionManager?.getSession(session.id) ?? session;
-    const terminalRef = currentSession.terminalRef?.trim();
-    if (!windowId || !terminalRef)
-        return false;
-    enqueueVsCodeCommand(windowId, {
-        id: (0, node_crypto_1.randomUUID)(),
-        type: 'disconnect-session',
-        terminalRef,
-    });
-    debugTerminalUpdate('vscode disconnect session command queued', {
-        id: session.id,
-        vscodeWindowId: session.vscodeWindowId,
-        windowId,
-        terminalRef,
-    });
-    return true;
-}
-function enqueueVsCodeCommand(windowId, command) {
-    if (shouldUseExternalBackend()) {
-        void queueBackendVsCodeCommand(windowId, command.type, command.terminalRef);
-        return;
-    }
-    const queue = pendingVsCodeCommandsByWindowId.get(windowId) ?? [];
-    queue.push(command);
-    while (queue.length > MAX_PENDING_VSCODE_COMMANDS_PER_WINDOW)
-        queue.shift();
-    pendingVsCodeCommandsByWindowId.set(windowId, queue);
-    flushPendingVsCodeCommandPoll(windowId);
-}
-function redactVsCodeCompanionUri(uri) {
-    const payloadIndex = uri.indexOf('payload=');
-    if (payloadIndex === -1)
-        return uri;
-    return `${uri.slice(0, payloadIndex)}payload=<redacted>`;
-}
-function isVsCodeSessionRequest(value) {
-    if (typeof value !== 'object' || value === null)
-        return false;
-    const candidate = value;
-    return (typeof candidate['id'] === 'string' &&
-        typeof candidate['name'] === 'string' &&
-        typeof candidate['cmd'] === 'string' &&
-        typeof candidate['cwd'] === 'string' &&
-        typeof candidate['shellType'] === 'string' &&
-        isShellType(candidate['shellType']) &&
-        (candidate['sshCommand'] === undefined || typeof candidate['sshCommand'] === 'string') &&
-        (candidate['vscodeWindowId'] === undefined || typeof candidate['vscodeWindowId'] === 'string') &&
-        (candidate['terminalRef'] === undefined || typeof candidate['terminalRef'] === 'string') &&
-        (candidate['terminalPid'] === undefined || typeof candidate['terminalPid'] === 'number'));
-}
 function getErrorMessage(error) {
     return error instanceof Error ? error.message : String(error);
 }
@@ -958,7 +459,7 @@ function shouldUseExternalBackend() {
     return process.env[LEGACY_IN_PROCESS_BACKEND_ENV] !== '1';
 }
 function shouldBackendOwnState() {
-    return process.env[BACKEND_OWNS_STATE_ENV] === '1';
+    return true;
 }
 function getBackendUrl(pathName) {
     return `http://${TERMINAL_UPDATE_HOST}:${TERMINAL_UPDATE_PORT}${pathName}`;
@@ -1224,10 +725,6 @@ function handleBackendEvent(eventName, payload) {
             if (shouldBackendOwnState() && Array.isArray(payload))
                 applyBackendSlackNotifications(payload);
             return;
-        case 'vscode:windows-update':
-            if (Array.isArray(payload))
-                applyBackendVsCodeWindows(payload);
-            return;
         default:
             return;
     }
@@ -1239,8 +736,7 @@ function isBackendState(value) {
     return Array.isArray(candidate.sessions) &&
         Array.isArray(candidate.manualTasks) &&
         Array.isArray(candidate.recurringTasks) &&
-        Array.isArray(candidate.slackNotifications) &&
-        Array.isArray(candidate.vscodeWindows);
+        Array.isArray(candidate.slackNotifications);
 }
 function isSlackNotification(value) {
     if (typeof value !== 'object' || value === null)
@@ -1257,7 +753,6 @@ function applyBackendState(state) {
         applyBackendRecurringTasks(state.recurringTasks);
         applyBackendSlackNotifications(state.slackNotifications);
     }
-    applyBackendVsCodeWindows(state.vscodeWindows);
 }
 function applyBackendSessions(sessions) {
     backendState.sessions = sessions.map(session => ({ ...session }));
@@ -1278,90 +773,20 @@ function applyBackendSlackNotifications(notifications) {
     slackNotifications.push(...notifications.map(notification => ({ ...notification })));
     mainWindow?.webContents.send('slack:list-update', slackNotifications.map(notification => ({ ...notification })));
 }
-function applyBackendVsCodeWindows(windows) {
-    backendState.vscodeWindows = windows.map(cloneVsCodeWindowEntry);
-    vscodeWindowsById.clear();
-    for (const windowEntry of backendState.vscodeWindows) {
-        rememberVsCodeWindow(windowEntry);
-    }
-}
-function cloneVsCodeWindowEntry(entry) {
-    const clone = {
-        windowId: entry.windowId,
-        lastSeenAt: entry.lastSeenAt,
-    };
-    if (entry.workspaceFolder)
-        clone.workspaceFolder = entry.workspaceFolder;
-    if (entry.workspaceName)
-        clone.workspaceName = entry.workspaceName;
-    if (entry.pid !== undefined)
-        clone.pid = entry.pid;
-    if (entry.terminals !== undefined)
-        clone.terminals = entry.terminals.map(terminal => ({ ...terminal }));
-    if (entry.sessionIds !== undefined)
-        clone.sessionIds = [...entry.sessionIds];
-    return clone;
-}
-function getBackendSession(id) {
-    return backendState.sessions.find(session => session.id === id) ?? null;
-}
-async function openSessionInVsCodeWithBackend(session) {
-    const refreshedSession = getBackendSession(session.id) ?? session;
-    debugTerminalUpdate('vscode open requested', getVsCodeOpenDebugDetails(refreshedSession));
-    try {
-        const windowId = refreshedSession.vscodeWindowId?.trim();
-        const terminalRef = refreshedSession.terminalRef?.trim();
-        if (windowId && terminalRef) {
-            const didRequestWindowFocus = canFocusRegisteredVsCodeWindow(refreshedSession)
-                ? await focusRegisteredVsCodeWindow(refreshedSession)
-                : false;
-            const didQueueTerminalFocus = await queueBackendVsCodeCommand(windowId, 'focus-terminal', terminalRef);
-            return didRequestWindowFocus || didQueueTerminalFocus;
-        }
-        const launchId = (0, node_crypto_1.randomUUID)();
-        await backendPost('/api/vscode/register-launch', {
-            launchId,
-            sessionId: refreshedSession.id,
-        });
-        const companionUri = buildVsCodeCompanionUriWithLaunchId(refreshedSession, launchId);
-        debugTerminalUpdate('vscode companion deeplink requested', getVsCodeOpenDebugDetails(refreshedSession, {
-            companionUri: redactVsCodeCompanionUri(companionUri),
-        }));
-        await electron_1.shell.openExternal(companionUri);
-        scheduleVsCodeWindowFocus(refreshedSession);
-        return true;
-    }
-    catch (error) {
-        debugTerminalUpdate('vscode open failed', getVsCodeOpenDebugDetails(refreshedSession, {
-            error: getErrorMessage(error),
-        }));
-        console.error('Failed to open VS Code:', getErrorMessage(error));
-        return false;
-    }
-}
-async function queueBackendVsCodeCommand(windowId, type, terminalRef) {
-    try {
-        await backendPost('/api/vscode/queue-command', { windowId, type, terminalRef });
-        return true;
-    }
-    catch (error) {
-        console.error(`Failed to queue VS Code command: ${getErrorMessage(error)}`);
-        return false;
-    }
-}
 function isTerminalUpdateDebugEnabled() {
     const value = process.env[TERMINAL_UPDATE_DEBUG_ENV]?.toLowerCase();
     return value === '1' || value === 'true';
 }
 function debugTerminalUpdate(message, details = {}) {
+    if (!isTerminalUpdateDebugEnabled())
+        return;
     const serializedDetails = Object.entries(details)
         .filter(([, value]) => value !== undefined)
         .map(([key, value]) => `${key}=${formatDebugValue(value)}`)
         .join(' ');
     const line = `[multitasker terminal ${new Date().toISOString()}] ${message}${serializedDetails ? ` ${serializedDetails}` : ''}`;
     appendTerminalDebugLog(line, details);
-    if (isTerminalUpdateDebugEnabled())
-        console.info(line);
+    console.info(line);
 }
 function appendTerminalDebugLog(line, details) {
     const sessionId = getDebugLogSessionId(details);
@@ -1495,7 +920,6 @@ function terminalEventDebugDetails(event, sessionName) {
         shellType: event.shellType,
         hasLaunchCommand: event.hasLaunchCommand,
         primary: event.primary,
-        windowId: event.windowId,
         captureState: event.captureState,
         captureReason: event.captureReason,
         output: event.output === undefined ? undefined : terminalOutputDebugValue(event.output),
@@ -1515,78 +939,6 @@ function stripTerminalControlSequences(value) {
         .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
         .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
         .replace(/\r/g, '\n');
-}
-function getDeepLinkFromArgv(argv) {
-    return argv.find(arg => arg.startsWith(`${MULTITASKER_PROTOCOL}://`));
-}
-function enqueueDeepLink(url) {
-    if (!url.startsWith(`${MULTITASKER_PROTOCOL}://`))
-        return;
-    pendingDeepLinks.push(url);
-    flushPendingDeepLinks();
-}
-function flushPendingDeepLinks() {
-    if (shouldBackendOwnState()) {
-        if (!backendAvailable)
-            return;
-    }
-    else if (!sessionManager) {
-        return;
-    }
-    while (pendingDeepLinks.length > 0) {
-        const deepLink = pendingDeepLinks.shift();
-        if (!deepLink)
-            continue;
-        processDeepLink(deepLink);
-    }
-}
-function parseCreateSessionRequest(payload) {
-    if (typeof payload !== 'object' || payload === null)
-        return null;
-    const record = payload;
-    const rawId = readStringField(record, 'id').trim() || readStringField(record, 'taskId').trim();
-    const cwd = readStringField(record, 'cwd').trim();
-    const rawShellType = readStringField(record, 'shellType').trim();
-    const shellType = isShellType(rawShellType) ? rawShellType : 'powershell';
-    const sshCommand = (readStringField(record, 'sshCommand') || readStringField(record, 'sshHost')).trim();
-    const cmd = (readStringField(record, 'command') || readStringField(record, 'cmd')).trim();
-    const name = readStringField(record, 'name').trim() || node_path_1.default.basename(cwd) || sshCommand || 'Session';
-    const vscodeWindowId = readStringField(record, 'windowId').trim();
-    const terminalRef = readStringField(record, 'terminalRef').trim();
-    const terminalName = readStringField(record, 'terminalName').trim();
-    const launchId = readStringField(record, 'launchId').trim();
-    const terminalPid = readOptionalNumberField(record, 'terminalPid');
-    const id = rawId ||
-        (launchId ? pendingLaunchTaskIdByLaunchId.get(launchId) ?? '' : '') ||
-        (terminalRef ? taskIdByTerminalRef.get(terminalRef) ?? '' : '');
-    if (shellType === 'ssh') {
-        if (!sshCommand)
-            return null;
-    }
-    else if (!cwd) {
-        return null;
-    }
-    const request = {
-        name,
-        cmd,
-        cwd,
-        shellType,
-    };
-    if (id)
-        request.id = id;
-    if (sshCommand)
-        request.sshCommand = sshCommand;
-    if (vscodeWindowId)
-        request.vscodeWindowId = vscodeWindowId;
-    if (terminalRef)
-        request.terminalRef = terminalRef;
-    if (terminalPid !== undefined)
-        request.terminalPid = terminalPid;
-    if (terminalName)
-        request.terminalName = terminalName;
-    if (launchId)
-        request.launchId = launchId;
-    return request;
 }
 function parseTerminalUpdateRequest(payload) {
     if (typeof payload !== 'object' || payload === null)
@@ -1624,7 +976,6 @@ function parseTerminalEventRequest(payload) {
         return null;
     const terminalRef = readStringField(record, 'terminalRef').trim();
     const launchId = readStringField(record, 'launchId').trim();
-    const windowId = readStringField(record, 'windowId').trim();
     const terminalPid = readOptionalNumberField(record, 'terminalPid');
     const terminalName = readStringField(record, 'terminalName').trim();
     const terminalCwd = readStringField(record, 'terminalCwd').trim();
@@ -1633,8 +984,6 @@ function parseTerminalEventRequest(payload) {
     const id = resolveTerminalEventTaskId({
         explicitTaskId,
         terminalRef,
-        launchId,
-        windowId,
         terminalPid,
         terminalName,
         terminalCwd,
@@ -1650,8 +999,6 @@ function parseTerminalEventRequest(payload) {
         event.terminalRef = terminalRef;
     if (launchId)
         event.launchId = launchId;
-    if (windowId)
-        event.windowId = windowId;
     if (terminalPid !== undefined)
         event.terminalPid = terminalPid;
     if (terminalName)
@@ -1688,7 +1035,6 @@ function parseTerminalEventRequest(payload) {
     if (captureReason)
         event.captureReason = captureReason.slice(0, 500);
     rememberTaskTerminalBinding(id, {
-        vscodeWindowId: windowId,
         terminalRef,
         terminalPid,
         captureState: event.captureState,
@@ -1697,11 +1043,6 @@ function parseTerminalEventRequest(payload) {
     return event;
 }
 function resolveTerminalEventTaskId(identity) {
-    if (identity.launchId) {
-        const launchTaskId = pendingLaunchTaskIdByLaunchId.get(identity.launchId);
-        if (launchTaskId)
-            return launchTaskId;
-    }
     if (identity.terminalRef) {
         const terminalTaskId = taskIdByTerminalRef.get(identity.terminalRef);
         if (terminalTaskId)
@@ -1728,7 +1069,6 @@ function findSessionForTerminalIdentity(identity) {
     if (!normalizedTerminalPath)
         return null;
     return sessions.find(session => !session.terminalRef?.trim() &&
-        (!identity.windowId || !session.vscodeWindowId || session.vscodeWindowId === identity.windowId) &&
         normalizePathForCompare(session.cwd) === normalizedTerminalPath) ?? null;
 }
 function createManualTask(textValue) {
@@ -2059,6 +1399,8 @@ function getGoogleCalendarConnectionStatus(connection) {
         status.accountName = connection.accountName;
     if (connection.lastSyncedAt)
         status.lastSyncedAt = connection.lastSyncedAt;
+    if (connection.authError)
+        status.authError = connection.authError;
     return status;
 }
 function getDefaultGoogleCalendarStatusMessage(settings, configured, connected, accountCount) {
@@ -2292,6 +1634,14 @@ function stopGoogleCalendarAuthFlow() {
         // Server may not have started listening yet.
     }
 }
+function getGoogleCalendarReauthTaskId(connectionId) {
+    return `google-calendar-reauth-${connectionId}`;
+}
+function clearGoogleCalendarReauthTask(connectionId) {
+    const taskId = getGoogleCalendarReauthTaskId(connectionId);
+    if (manualTasks.some(task => task.id === taskId))
+        removeManualTask(taskId);
+}
 async function refreshGoogleCalendarEvents() {
     const settings = (0, settings_1.loadSettings)().googleCalendar;
     if (!settings.enabled)
@@ -2304,6 +1654,7 @@ async function refreshGoogleCalendarEvents() {
         return broadcastGoogleCalendarStatus('Google Calendar is not connected.');
     const events = [];
     const failures = [];
+    const reauthRequired = [];
     try {
         for (const connection of connections) {
             if (!connection.enabled)
@@ -2312,12 +1663,26 @@ async function refreshGoogleCalendarEvents() {
                 const accessToken = await getValidGoogleCalendarAccessToken(connection);
                 const connectionEvents = await fetchGoogleCalendarEvents(settings, connection, accessToken);
                 connection.lastSyncedAt = Date.now();
+                if (connection.authError) {
+                    delete connection.authError;
+                    clearGoogleCalendarReauthTask(connection.id);
+                }
                 events.push(...connectionEvents);
             }
             catch (error) {
                 const accountLabel = getGoogleCalendarConnectionLabel(connection);
+                const message = getErrorMessage(error);
                 failures.push(accountLabel);
-                console.error(`Google Calendar sync failed for ${accountLabel}: ${getErrorMessage(error)}`);
+                if (/invalid_grant|invalid_token|unauthorized_client|insufficient[_ ]?(authentication[_ ]?)?scopes?|ACCESS_TOKEN_SCOPE_INSUFFICIENT|\b401\b/i.test(message)) {
+                    connection.authError = 'reauth_required';
+                    reauthRequired.push(accountLabel);
+                    addManualTask({
+                        id: getGoogleCalendarReauthTaskId(connection.id),
+                        text: truncateManualTaskText(`Reconnect Google Calendar for ${accountLabel}`),
+                        createdAt: Date.now(),
+                    });
+                }
+                console.error(`Google Calendar sync failed for ${accountLabel}: ${message}`);
             }
         }
         googleCalendarLastSyncedAt = Date.now();
@@ -2326,6 +1691,9 @@ async function refreshGoogleCalendarEvents() {
         googleCalendarEvents.push(...filterActiveGoogleCalendarEvents(events).sort((a, b) => a.startMs - b.startMs));
         (0, settings_1.saveGoogleCalendarEvents)(googleCalendarEvents);
         broadcastGoogleCalendarEvents();
+        if (reauthRequired.length > 0) {
+            return broadcastGoogleCalendarStatus(`Reconnect required for ${reauthRequired.join(', ')}. Sign in again to resume Google Calendar sync.`);
+        }
         if (failures.length > 0) {
             return broadcastGoogleCalendarStatus(`Synced ${googleCalendarEvents.length} event(s); ${failures.length} account(s) failed.`);
         }
@@ -2668,13 +2036,17 @@ function disconnectGoogleCalendar(connectionId) {
         googleCalendarEvents.splice(0, googleCalendarEvents.length, ...googleCalendarEvents.filter(event => event.connectionId !== normalizedConnectionId));
         (0, settings_1.saveGoogleCalendarEvents)(googleCalendarEvents);
         broadcastGoogleCalendarEvents();
+        clearGoogleCalendarReauthTask(normalizedConnectionId);
         return broadcastGoogleCalendarStatus('Google Calendar account disconnected.');
     }
+    const allConnectionIds = (0, settings_1.loadGoogleCalendarConnections)().map(connection => connection.id);
     (0, settings_1.clearGoogleCalendarAuth)();
     (0, settings_1.clearGoogleCalendarConnections)();
     (0, settings_1.clearGoogleCalendarEvents)();
     googleCalendarEvents.length = 0;
     googleCalendarLastSyncedAt = 0;
+    for (const id of allConnectionIds)
+        clearGoogleCalendarReauthTask(id);
     const settings = (0, settings_1.loadSettings)();
     (0, settings_1.saveSettings)({
         ...settings,
@@ -3682,493 +3054,11 @@ function restorePersistedRecurringTasks() {
     recurringTasks.length = 0;
     recurringTasks.push(...(0, settings_1.loadRecurringTasks)().slice(0, MAX_RECURRING_TASKS));
 }
-function parseVsCodeWindowRegistration(payload) {
-    if (typeof payload !== 'object' || payload === null)
-        return null;
-    const record = payload;
-    const windowId = readStringField(record, 'windowId').trim();
-    if (!windowId)
-        return null;
-    const registration = { windowId };
-    const workspaceFolder = readStringField(record, 'workspaceFolder').trim();
-    if (workspaceFolder)
-        registration.workspaceFolder = workspaceFolder;
-    const workspaceName = readStringField(record, 'workspaceName').trim();
-    if (workspaceName)
-        registration.workspaceName = workspaceName;
-    const pid = readOptionalNumberField(record, 'pid');
-    if (pid !== undefined)
-        registration.pid = pid;
-    if (Array.isArray(record['terminals'])) {
-        const terminals = record['terminals']
-            .map(parseVsCodeTerminalRegistration)
-            .filter((terminal) => terminal !== null);
-        registration.terminals = terminals;
-    }
-    if (Array.isArray(record['sessionIds']))
-        registration.sessionIds = readStringArrayField(record, 'sessionIds');
-    return registration;
-}
-function parseVsCodeTerminalRegistration(payload) {
-    if (typeof payload !== 'object' || payload === null)
-        return null;
-    const record = payload;
-    const terminalRef = readStringField(record, 'terminalRef').trim();
-    if (!terminalRef)
-        return null;
-    const terminal = { terminalRef };
-    const terminalName = readStringField(record, 'terminalName').trim();
-    if (terminalName)
-        terminal.terminalName = terminalName;
-    const terminalCwd = readStringField(record, 'terminalCwd').trim();
-    if (terminalCwd)
-        terminal.terminalCwd = terminalCwd;
-    const rawShellType = readStringField(record, 'shellType').trim();
-    if (isShellType(rawShellType))
-        terminal.shellType = rawShellType;
-    const terminalPid = readOptionalNumberField(record, 'terminalPid');
-    if (terminalPid !== undefined)
-        terminal.terminalPid = terminalPid;
-    const isActive = readOptionalBooleanField(record, 'isActive');
-    if (isActive !== undefined)
-        terminal.isActive = isActive;
-    const rawCaptureState = readStringField(record, 'captureState').trim();
-    if (isTerminalCaptureState(rawCaptureState))
-        terminal.captureState = rawCaptureState;
-    const captureReason = readStringField(record, 'captureReason').trim();
-    if (captureReason)
-        terminal.captureReason = captureReason;
-    return terminal;
-}
-async function startTerminalUpdateServer() {
-    if (shouldUseExternalBackend()) {
-        await ensureBackendServer();
-        return;
-    }
-    startLegacyTerminalUpdateServer();
-}
-function startLegacyTerminalUpdateServer() {
-    if (terminalUpdateServer)
-        return;
-    const server = (0, node_http_1.createServer)((request, response) => {
-        void handleTerminalUpdateHttpRequest(request, response);
-    });
-    server.on('error', (error) => {
-        console.error(`Failed to start terminal update server: ${getErrorMessage(error)}`);
-    });
-    server.listen(TERMINAL_UPDATE_PORT, TERMINAL_UPDATE_HOST);
-    debugTerminalUpdate('terminal update server started', {
-        host: TERMINAL_UPDATE_HOST,
-        port: TERMINAL_UPDATE_PORT,
-        updatePath: TERMINAL_UPDATE_PATH,
-        eventPath: TERMINAL_EVENT_PATH,
-    });
-    terminalUpdateServer = server;
-}
-function stopTerminalUpdateServer() {
-    stopBackendServer();
-    if (!terminalUpdateServer)
-        return;
-    closePendingVsCodeCommandPolls();
-    terminalUpdateServer.close();
-    terminalUpdateServer = null;
-}
-async function handleTerminalUpdateHttpRequest(request, response) {
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Headers', 'content-type');
-    response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    if (request.method === 'OPTIONS') {
-        response.writeHead(204);
-        response.end();
-        return;
-    }
-    const requestUrl = new URL(request.url ?? '/', `http://${TERMINAL_UPDATE_HOST}`);
-    const requestPath = requestUrl.pathname;
-    if (request.method === 'GET' && isVsCodeCommandPath(requestPath)) {
-        handleVsCodeCommandPoll(requestUrl, response);
-        return;
-    }
-    const isTerminalUpdatePath = requestPath === TERMINAL_UPDATE_PATH ||
-        requestPath === EXTENSION_VSCODE_TERMINAL_UPDATE_PATH;
-    const isTerminalEventPath = requestPath === TERMINAL_EVENT_PATH ||
-        requestPath === EXTENSION_VSCODE_TERMINAL_EVENT_PATH;
-    const isVsCodeWindowPath = requestPath === VSCODE_WINDOW_PATH ||
-        requestPath === EXTENSION_VSCODE_WINDOW_PATH;
-    const isVsCodeTaskPath = requestPath === EXTENSION_VSCODE_TASKS_PATH;
-    const isTaskApiPath = requestPath === '/api/tasks' ||
-        requestPath === '/api/task/add' ||
-        requestPath === '/api/manual-task/add';
-    const isSlackEventPath = requestPath === SLACK_EVENT_PATH ||
-        requestPath === EXTENSION_SLACK_EVENT_PATH;
-    const isSlackNotificationPath = requestPath === SLACK_NOTIFICATION_PATH ||
-        requestPath === EXTENSION_SLACK_NOTIFICATION_PATH;
-    const isSlackNotificationDismissPath = requestPath === SLACK_NOTIFICATION_DISMISS_PATH ||
-        requestPath === EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH;
-    if (request.method !== 'POST' ||
-        (!isTerminalUpdatePath &&
-            !isTerminalEventPath &&
-            !isVsCodeWindowPath &&
-            !isVsCodeTaskPath &&
-            !isTaskApiPath &&
-            !isSlackEventPath &&
-            !isSlackNotificationPath &&
-            !isSlackNotificationDismissPath)) {
-        writeJsonResponse(response, 404, { ok: false, error: 'not_found' });
-        return;
-    }
-    let parsedPayload;
-    try {
-        parsedPayload = JSON.parse(await readHttpBody(request));
-    }
-    catch (error) {
-        const statusCode = error instanceof HttpBodyTooLargeError ? 413 : 400;
-        writeJsonResponse(response, statusCode, { ok: false, error: getErrorMessage(error) });
-        return;
-    }
-    if (isVsCodeWindowPath) {
-        const registration = parseVsCodeWindowRegistration(parsedPayload);
-        if (!registration) {
-            writeJsonResponse(response, 400, { ok: false, error: 'invalid_vscode_window' });
-            return;
-        }
-        rememberVsCodeWindow(registration);
-    }
-    else if (isVsCodeTaskPath || isTaskApiPath) {
-        const task = createManualTask(readManualTaskText(parsedPayload));
-        if (!task) {
-            writeJsonResponse(response, 400, { ok: false, error: 'invalid_manual_task' });
-            return;
-        }
-        writeJsonResponse(response, 200, { ok: true, task });
-        return;
-    }
-    else if (isSlackEventPath) {
-        try {
-            await handleSlackEventEnvelope(parsedPayload);
-        }
-        catch (error) {
-            const message = getErrorMessage(error);
-            debugSlackLog('Slack event handling failed', { error: message });
-            writeJsonResponse(response, 500, { ok: false, error: message });
-            return;
-        }
-    }
-    else if (isSlackNotificationDismissPath) {
-        const dismissRequest = parseSlackNotificationDismissRequest(parsedPayload);
-        if (!dismissRequest) {
-            writeJsonResponse(response, 400, { ok: false, error: 'invalid_slack_notification_dismiss' });
-            return;
-        }
-        const removed = handleSlackNotificationDismiss(dismissRequest);
-        writeJsonResponse(response, 200, { ok: true, removed });
-        return;
-    }
-    else if (isSlackNotificationPath) {
-        const notification = parseSlackNotificationRequest(parsedPayload);
-        if (!notification) {
-            writeJsonResponse(response, 400, { ok: false, error: 'invalid_slack_notification' });
-            return;
-        }
-        handleSlackNotification(notification);
-    }
-    else if (isTerminalEventPath) {
-        const event = parseTerminalEventRequest(parsedPayload);
-        if (!event) {
-            writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_event' });
-            return;
-        }
-        handleTerminalEvent(event);
-    }
-    else {
-        const update = parseTerminalUpdateRequest(parsedPayload);
-        if (!update) {
-            writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_update' });
-            return;
-        }
-        handleTerminalUpdate(update);
-    }
-    writeJsonResponse(response, 200, { ok: true });
-}
-function handleVsCodeCommandPoll(requestUrl, response) {
-    const windowId = requestUrl.searchParams.get('windowId')?.trim();
-    if (!windowId) {
-        writeJsonResponse(response, 400, { ok: false, error: 'missing_window_id' });
-        return;
-    }
-    rememberVsCodeWindow(readVsCodeWindowRegistrationFromUrl(requestUrl, windowId));
-    const commands = pendingVsCodeCommandsByWindowId.get(windowId) ?? [];
-    if (commands.length > 0) {
-        pendingVsCodeCommandsByWindowId.delete(windowId);
-        writeVsCodeCommandPollResponse(response, commands);
-        return;
-    }
-    completePendingVsCodeCommandPoll(windowId, []);
-    const timeout = setTimeout(() => {
-        const pendingPoll = pendingVsCodeCommandPollsByWindowId.get(windowId);
-        if (!pendingPoll || pendingPoll.response !== response)
-            return;
-        pendingVsCodeCommandPollsByWindowId.delete(windowId);
-        writeVsCodeCommandPollResponse(response, []);
-    }, VSCODE_COMMAND_LONG_POLL_TIMEOUT_MS);
-    pendingVsCodeCommandPollsByWindowId.set(windowId, { response, timeout });
-    response.on('close', () => {
-        const pendingPoll = pendingVsCodeCommandPollsByWindowId.get(windowId);
-        if (!pendingPoll || pendingPoll.response !== response)
-            return;
-        clearTimeout(pendingPoll.timeout);
-        pendingVsCodeCommandPollsByWindowId.delete(windowId);
-    });
-}
-function flushPendingVsCodeCommandPoll(windowId) {
-    if (!pendingVsCodeCommandPollsByWindowId.has(windowId))
-        return;
-    const commands = pendingVsCodeCommandsByWindowId.get(windowId) ?? [];
-    pendingVsCodeCommandsByWindowId.delete(windowId);
-    completePendingVsCodeCommandPoll(windowId, commands);
-}
-function completePendingVsCodeCommandPoll(windowId, commands) {
-    const pendingPoll = pendingVsCodeCommandPollsByWindowId.get(windowId);
-    if (!pendingPoll)
-        return;
-    clearTimeout(pendingPoll.timeout);
-    pendingVsCodeCommandPollsByWindowId.delete(windowId);
-    if (!pendingPoll.response.writableEnded) {
-        writeVsCodeCommandPollResponse(pendingPoll.response, commands);
-    }
-}
-function closePendingVsCodeCommandPolls() {
-    [...pendingVsCodeCommandPollsByWindowId.keys()].forEach(windowId => {
-        completePendingVsCodeCommandPoll(windowId, []);
-    });
-}
-function writeVsCodeCommandPollResponse(response, commands) {
-    writeJsonResponse(response, 200, { ok: true, longPoll: true, commands });
-}
-function readVsCodeWindowRegistrationFromUrl(requestUrl, windowId) {
-    const registration = { windowId };
-    const workspaceFolder = requestUrl.searchParams.get('workspaceFolder')?.trim();
-    if (workspaceFolder)
-        registration.workspaceFolder = workspaceFolder;
-    const workspaceName = requestUrl.searchParams.get('workspaceName')?.trim();
-    if (workspaceName)
-        registration.workspaceName = workspaceName;
-    const rawPid = requestUrl.searchParams.get('pid');
-    const pid = rawPid ? Number(rawPid) : NaN;
-    if (Number.isFinite(pid))
-        registration.pid = pid;
-    if (requestUrl.searchParams.get('sessionIdsKnown') === '1') {
-        registration.sessionIds = requestUrl.searchParams.getAll('sessionId')
-            .map(sessionId => sessionId.trim())
-            .filter(sessionId => sessionId.length > 0);
-    }
-    return registration;
-}
-function readHttpBody(request) {
-    return new Promise((resolve, reject) => {
-        let body = '';
-        let bodyBytes = 0;
-        let rejected = false;
-        request.setEncoding('utf8');
-        request.on('data', (chunk) => {
-            if (rejected)
-                return;
-            bodyBytes += Buffer.byteLength(chunk, 'utf8');
-            if (bodyBytes > MAX_TERMINAL_EVENT_BODY_BYTES) {
-                rejected = true;
-                reject(new HttpBodyTooLargeError('request payload is too large'));
-                return;
-            }
-            body += chunk;
-        });
-        request.on('end', () => {
-            if (!rejected)
-                resolve(body);
-        });
-        request.on('error', error => {
-            if (!rejected)
-                reject(error);
-        });
-    });
-}
-function writeJsonResponse(response, statusCode, body) {
-    const encodedBody = JSON.stringify(body);
-    response.writeHead(statusCode, {
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(encodedBody),
-    });
-    response.end(encodedBody);
-}
-function isVsCodeCommandPath(requestPath) {
-    return requestPath === VSCODE_COMMAND_PATH || requestPath === EXTENSION_VSCODE_COMMAND_PATH;
-}
-function rememberVsCodeWindow(registration) {
-    const existingEntry = vscodeWindowsById.get(registration.windowId);
-    const entry = {
-        windowId: registration.windowId,
-        lastSeenAt: Date.now(),
-    };
-    const workspaceFolder = registration.workspaceFolder ?? existingEntry?.workspaceFolder;
-    if (workspaceFolder)
-        entry.workspaceFolder = workspaceFolder;
-    const workspaceName = registration.workspaceName ?? existingEntry?.workspaceName;
-    if (workspaceName)
-        entry.workspaceName = workspaceName;
-    const pid = registration.pid ?? existingEntry?.pid;
-    if (pid !== undefined)
-        entry.pid = pid;
-    if (registration.terminals !== undefined) {
-        entry.terminals = registration.terminals;
-    }
-    else if (existingEntry?.terminals !== undefined) {
-        entry.terminals = existingEntry.terminals;
-    }
-    if (registration.sessionIds !== undefined) {
-        entry.sessionIds = registration.sessionIds;
-    }
-    else if (existingEntry?.sessionIds !== undefined) {
-        entry.sessionIds = existingEntry.sessionIds;
-    }
-    vscodeWindowsById.set(registration.windowId, entry);
-    bindSessionsToVsCodeTerminals(entry);
-    bindSessionsToVsCodeWindow(registration);
-}
-function bindSessionsToVsCodeTerminals(registration) {
-    const terminals = registration.terminals ?? [];
-    if (terminals.length === 0)
-        return;
-    let didBindSession = false;
-    const boundSessionIds = new Set();
-    const bindTerminal = (session, terminal, matchReason) => {
-        if (boundSessionIds.has(session.id))
-            return;
-        const previousTerminalRef = session.terminalRef;
-        const reboundSession = sessionManager?.bindSessionToTerminal(session.id, buildTerminalBinding({
-            vscodeWindowId: registration.windowId,
-            terminalRef: terminal.terminalRef,
-            terminalPid: terminal.terminalPid,
-            terminalCaptureState: terminal.captureState,
-            terminalCaptureReason: terminal.captureReason,
-        }));
-        if (!reboundSession)
-            return;
-        if (previousTerminalRef && previousTerminalRef !== terminal.terminalRef) {
-            taskIdByTerminalRef.delete(previousTerminalRef);
-        }
-        taskIdByTerminalRef.set(terminal.terminalRef, reboundSession.id);
-        boundSessionIds.add(reboundSession.id);
-        if (previousTerminalRef !== terminal.terminalRef || session.status === 'detached') {
-            didBindSession = true;
-            debugTerminalUpdate('session rebound to vscode terminal', {
-                id: reboundSession.id,
-                sessionName: reboundSession.name,
-                vscodeWindowId: registration.windowId,
-                terminalRef: terminal.terminalRef,
-                terminalPid: terminal.terminalPid,
-                terminalName: terminal.terminalName,
-                terminalCwd: terminal.terminalCwd,
-                matchReason,
-            });
-        }
-    };
-    for (const terminal of terminals) {
-        const session = findKnownSessionForTerminalRef(terminal.terminalRef);
-        if (session)
-            bindTerminal(session, terminal, 'known terminalRef');
-    }
-    for (const terminal of terminals) {
-        if (taskIdByTerminalRef.has(terminal.terminalRef))
-            continue;
-        const match = findSessionForTerminalRegistration(registration, terminal, boundSessionIds);
-        if (match)
-            bindTerminal(match.session, terminal, match.reason);
-    }
-    if (didBindSession)
-        (0, settings_1.saveSessions)(getSessionsStateToSave());
-}
-function findKnownSessionForTerminalRef(terminalRef) {
-    const mappedTaskId = taskIdByTerminalRef.get(terminalRef);
-    if (mappedTaskId)
-        return sessionManager?.getSession(mappedTaskId) ?? null;
-    return sessionManager?.getSessions().find(session => session.terminalRef === terminalRef) ?? null;
-}
-function findSessionForTerminalRegistration(registration, terminal, excludedSessionIds) {
-    const sessions = (sessionManager?.getSessions() ?? [])
-        .filter(session => !excludedSessionIds.has(session.id));
-    const exactRef = sessions.find(session => session.terminalRef === terminal.terminalRef);
-    if (exactRef)
-        return { session: exactRef, reason: 'exact terminalRef' };
-    if (terminal.terminalPid !== undefined) {
-        const exactPid = sessions.find(session => (session.terminalPid ?? getLegacyAttachedTerminalPid(session.id)) === terminal.terminalPid);
-        if (exactPid)
-            return { session: exactPid, reason: 'exact terminalPid' };
-    }
-    const terminalPath = normalizePathForCompare(terminal.terminalCwd ?? '');
-    if (!terminalPath)
-        return null;
-    const matchingTerminals = (registration.terminals ?? [])
-        .filter(candidate => normalizePathForCompare(candidate.terminalCwd ?? '') === terminalPath);
-    if (matchingTerminals.length > 1) {
-        debugTerminalUpdate('session terminal rebind skipped; ambiguous cwd terminals', {
-            vscodeWindowId: registration.windowId,
-            terminalRef: terminal.terminalRef,
-            terminalCwd: terminal.terminalCwd,
-            candidateCount: matchingTerminals.length,
-            candidateTerminalRefs: matchingTerminals.map(candidate => candidate.terminalRef),
-            candidateTerminalNames: matchingTerminals.map(candidate => candidate.terminalName ?? ''),
-        });
-        return null;
-    }
-    const matchingSessions = sessions.filter(session => !session.terminalRef?.trim() &&
-        (!session.vscodeWindowId || session.vscodeWindowId === registration.windowId) &&
-        normalizePathForCompare(session.cwd) === terminalPath);
-    if (matchingSessions.length > 1) {
-        debugTerminalUpdate('session terminal rebind skipped; ambiguous cwd sessions', {
-            vscodeWindowId: registration.windowId,
-            terminalRef: terminal.terminalRef,
-            terminalCwd: terminal.terminalCwd,
-            candidateCount: matchingSessions.length,
-            candidateSessionIds: matchingSessions.map(session => session.id),
-            candidateSessionNames: matchingSessions.map(session => session.name),
-        });
-        return null;
-    }
-    const matchingSession = matchingSessions[0];
-    return matchingSession ? { session: matchingSession, reason: 'unique cwd fallback' } : null;
-}
-function bindSessionsToVsCodeWindow(registration) {
-    if (!registration.sessionIds || registration.sessionIds.length === 0)
-        return;
-    let didBindSession = false;
-    for (const sessionId of registration.sessionIds) {
-        const previousSession = sessionManager?.getSession(sessionId);
-        const reboundSession = sessionManager?.bindSessionToVsCodeWindow(sessionId, registration.windowId);
-        if (!previousSession || !reboundSession || previousSession.vscodeWindowId === reboundSession.vscodeWindowId) {
-            continue;
-        }
-        didBindSession = true;
-        debugTerminalUpdate('session rebound to vscode window', {
-            id: reboundSession.id,
-            sessionName: reboundSession.name,
-            vscodeWindowId: reboundSession.vscodeWindowId,
-            previousVsCodeWindowId: previousSession.vscodeWindowId,
-            workspaceFolder: registration.workspaceFolder,
-            workspaceName: registration.workspaceName,
-        });
-    }
-    if (didBindSession)
-        (0, settings_1.saveSessions)(getSessionsStateToSave());
-}
-function isDeepLinkPath(parsedUrl, pathName, hostName) {
-    return (parsedUrl.pathname === pathName ||
-        (parsedUrl.hostname === hostName && (parsedUrl.pathname === '' || parsedUrl.pathname === '/')));
-}
 function applyTerminalUpdate(update) {
-    const previousSession = sessionManager?.getSession(update.id) ?? null;
-    const session = sessionManager?.updateTerminalState(update) ?? null;
-    if (!session) {
-        debugTerminalUpdate('terminal update could not be applied', terminalUpdateDebugDetails(update));
+    const previousSession = sessionManager?.getSession(update.id);
+    const session = sessionManager?.updateTerminalState(update);
+    if (!session)
         return false;
-    }
     debugTerminalUpdate('terminal update applied', {
         ...terminalUpdateDebugDetails(update),
         previousStatus: previousSession?.status,
@@ -4178,21 +3068,17 @@ function applyTerminalUpdate(update) {
     return true;
 }
 function applyTerminalEvent(event) {
-    const previousSession = sessionManager?.getSession(event.id) ?? null;
-    const sessionName = previousSession?.name ?? event.terminalName;
-    const result = sessionManager?.updateTerminalEventWithDetails(event) ?? null;
-    if (!result) {
-        debugTerminalUpdate('terminal event could not be applied', terminalEventDebugDetails(event, sessionName));
+    const previousSession = sessionManager?.getSession(event.id);
+    const result = sessionManager?.updateTerminalEventWithDetails(event);
+    if (!result)
         return false;
-    }
-    const { session, statusUpdate } = result;
     debugTerminalUpdate('terminal event applied', {
-        ...terminalEventDebugDetails(event, session.name),
-        ...terminalEventStatusDebugDetails(statusUpdate),
+        ...terminalEventDebugDetails(event, getTerminalEventSessionName(event)),
+        ...terminalEventStatusDebugDetails(result.statusUpdate),
         previousStatus: previousSession?.status,
-        nextStatus: session.status,
+        nextStatus: result.session.status,
     });
-    saveSessionsAfterTerminalStatusChange(previousSession?.status, session.status);
+    saveSessionsAfterTerminalStatusChange(previousSession?.status, result.session.status);
     return true;
 }
 function saveSessionsAfterTerminalStatusChange(previousStatus, nextStatus) {
@@ -4205,31 +3091,13 @@ function saveSessionsAfterTerminalStatusChange(previousStatus, nextStatus) {
         (0, settings_1.saveSessions)(getSessionsStateToSave());
     }
 }
-function markSessionRemoved(id) {
-    removedSessionIds.add(id);
-    pendingTerminalUpdates.delete(id);
-    pendingTerminalEvents.delete(id);
-}
-function forgetRemovedSession(id) {
-    removedSessionIds.delete(id);
-}
 function handleTerminalUpdate(update) {
-    if (removedSessionIds.has(update.id)) {
-        debugTerminalUpdate('terminal update ignored for removed session', terminalUpdateDebugDetails(update));
-        return;
-    }
     if (applyTerminalUpdate(update))
         return;
     debugTerminalUpdate('terminal update queued for missing session', terminalUpdateDebugDetails(update));
     pendingTerminalUpdates.set(update.id, update);
 }
 function handleTerminalEvent(event) {
-    if (removedSessionIds.has(event.id)) {
-        debugTerminalUpdate('terminal event ignored for removed session', terminalEventDebugDetails(event, event.terminalName));
-        return;
-    }
-    if (event.windowId)
-        rememberVsCodeWindow({ windowId: event.windowId });
     debugTerminalUpdate('terminal event received', terminalEventDebugDetails(event, getTerminalEventSessionName(event)));
     if (applyTerminalEvent(event))
         return;
@@ -4287,137 +3155,169 @@ function flushPendingTerminalEvents(id) {
         flushPendingTerminalEvents(sessionId);
     });
 }
-function processDeepLink(url) {
-    if (shouldBackendOwnState()) {
-        void processDeepLinkWithBackend(url);
+async function startTerminalUpdateServer() {
+    if (shouldUseExternalBackend()) {
+        await ensureBackendServer();
         return;
     }
-    processLegacyDeepLink(url);
+    startLegacyTerminalUpdateServer();
 }
-async function processDeepLinkWithBackend(url) {
-    try {
-        const result = await backendPost('/api/deeplink', { url });
-        if (!result.ok) {
-            console.error('Failed to open deep link:', result.error ?? 'backend rejected deep link');
-            return;
-        }
-        if (result.action === 'open-vscode' && result.session) {
-            void openSessionInVsCodeWithBackend(result.session);
-        }
-        if (mainWindow) {
-            if (mainWindow.isMinimized())
-                mainWindow.restore();
-            mainWindow.show();
-            mainWindow.focus();
-        }
-    }
-    catch (error) {
-        console.error('Failed to open deep link:', getErrorMessage(error));
-    }
+function startLegacyTerminalUpdateServer() {
+    if (terminalUpdateServer)
+        return;
+    const server = (0, node_http_1.createServer)((request, response) => {
+        void handleTerminalUpdateHttpRequest(request, response);
+    });
+    server.on('error', (error) => {
+        console.error(`Failed to start terminal update server: ${getErrorMessage(error)}`);
+    });
+    server.listen(TERMINAL_UPDATE_PORT, TERMINAL_UPDATE_HOST);
+    debugTerminalUpdate('terminal update server started', {
+        host: TERMINAL_UPDATE_HOST,
+        port: TERMINAL_UPDATE_PORT,
+        updatePath: TERMINAL_UPDATE_PATH,
+        eventPath: TERMINAL_EVENT_PATH,
+    });
+    terminalUpdateServer = server;
 }
-function processLegacyDeepLink(url) {
-    if (!sessionManager)
+function stopTerminalUpdateServer() {
+    stopBackendServer();
+    if (!terminalUpdateServer)
         return;
-    let parsedUrl;
-    try {
-        parsedUrl = new URL(url);
-    }
-    catch (error) {
-        console.error('Failed to open deep link: invalid URL', getErrorMessage(error));
-        return;
-    }
-    if (parsedUrl.protocol !== `${MULTITASKER_PROTOCOL}:`)
-        return;
-    const createPath = isDeepLinkPath(parsedUrl, MULTITASKER_CREATE_PATH, 'create');
-    const terminalPath = isDeepLinkPath(parsedUrl, MULTITASKER_TERMINAL_PATH, 'terminal');
-    if (!createPath && !terminalPath) {
-        console.error(`Unsupported deep link path "${parsedUrl.pathname}"`);
+    terminalUpdateServer.close();
+    terminalUpdateServer = null;
+}
+async function handleTerminalUpdateHttpRequest(request, response) {
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Headers', 'content-type');
+    response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    if (request.method === 'OPTIONS') {
+        response.writeHead(204);
+        response.end();
         return;
     }
-    const payloadParam = parsedUrl.searchParams.get('payload');
-    if (!payloadParam) {
-        console.error('Failed to open deep link: missing payload');
+    const requestUrl = new URL(request.url ?? '/', `http://${TERMINAL_UPDATE_HOST}`);
+    const requestPath = requestUrl.pathname;
+    const isTerminalUpdatePath = requestPath === TERMINAL_UPDATE_PATH;
+    const isTerminalEventPath = requestPath === TERMINAL_EVENT_PATH;
+    const isTaskApiPath = requestPath === '/api/tasks' ||
+        requestPath === '/api/task/add' ||
+        requestPath === '/api/manual-task/add';
+    const isSlackEventPath = requestPath === SLACK_EVENT_PATH ||
+        requestPath === EXTENSION_SLACK_EVENT_PATH;
+    const isSlackNotificationPath = requestPath === SLACK_NOTIFICATION_PATH ||
+        requestPath === EXTENSION_SLACK_NOTIFICATION_PATH;
+    const isSlackNotificationDismissPath = requestPath === SLACK_NOTIFICATION_DISMISS_PATH ||
+        requestPath === EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH;
+    if (request.method !== 'POST' ||
+        (!isTerminalUpdatePath &&
+            !isTerminalEventPath &&
+            !isTaskApiPath &&
+            !isSlackEventPath &&
+            !isSlackNotificationPath &&
+            !isSlackNotificationDismissPath)) {
+        writeJsonResponse(response, 404, { ok: false, error: 'not_found' });
         return;
     }
     let parsedPayload;
     try {
-        parsedPayload = parseDeepLinkPayload(payloadParam);
+        parsedPayload = JSON.parse(await readHttpBody(request));
     }
     catch (error) {
-        console.error('Failed to open deep link: invalid payload JSON', getErrorMessage(error));
+        const statusCode = error instanceof HttpBodyTooLargeError ? 413 : 400;
+        writeJsonResponse(response, statusCode, { ok: false, error: getErrorMessage(error) });
         return;
     }
-    if (terminalPath) {
-        const event = parseTerminalEventRequest(parsedPayload);
-        if (event) {
-            handleTerminalEvent(event);
+    if (isTaskApiPath) {
+        const task = createManualTask(readManualTaskText(parsedPayload));
+        if (!task) {
+            writeJsonResponse(response, 400, { ok: false, error: 'invalid_manual_task' });
             return;
         }
+        writeJsonResponse(response, 200, { ok: true, task });
+        return;
+    }
+    else if (isSlackEventPath) {
+        try {
+            await handleSlackEventEnvelope(parsedPayload);
+        }
+        catch (error) {
+            const message = getErrorMessage(error);
+            debugSlackLog('Slack event handling failed', { error: message });
+            writeJsonResponse(response, 500, { ok: false, error: message });
+            return;
+        }
+    }
+    else if (isSlackNotificationDismissPath) {
+        const dismissRequest = parseSlackNotificationDismissRequest(parsedPayload);
+        if (!dismissRequest) {
+            writeJsonResponse(response, 400, { ok: false, error: 'invalid_slack_notification_dismiss' });
+            return;
+        }
+        const removed = handleSlackNotificationDismiss(dismissRequest);
+        writeJsonResponse(response, 200, { ok: true, removed });
+        return;
+    }
+    else if (isSlackNotificationPath) {
+        const notification = parseSlackNotificationRequest(parsedPayload);
+        if (!notification) {
+            writeJsonResponse(response, 400, { ok: false, error: 'invalid_slack_notification' });
+            return;
+        }
+        handleSlackNotification(notification);
+    }
+    else if (isTerminalEventPath) {
+        const event = parseTerminalEventRequest(parsedPayload);
+        if (!event) {
+            writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_event' });
+            return;
+        }
+        handleTerminalEvent(event);
+    }
+    else {
         const update = parseTerminalUpdateRequest(parsedPayload);
         if (!update) {
-            console.error('Failed to open deep link: invalid terminal event payload');
+            writeJsonResponse(response, 400, { ok: false, error: 'invalid_terminal_update' });
             return;
         }
         handleTerminalUpdate(update);
-        return;
     }
-    const request = parseCreateSessionRequest(parsedPayload);
-    if (!request) {
-        console.error('Failed to open deep link: invalid session payload');
-        return;
-    }
-    if (request.id)
-        forgetRemovedSession(request.id);
-    if (request.vscodeWindowId)
-        rememberVsCodeWindow({ windowId: request.vscodeWindowId });
-    const session = sessionManager.createSession(request.name, request.cmd, request.cwd, request.shellType, request.id ?? '', request.sshCommand ?? '', request.vscodeWindowId ?? '', request.terminalRef ?? '', request.terminalPid);
-    rememberTaskTerminalBinding(session.id, {
-        vscodeWindowId: request.vscodeWindowId,
-        terminalRef: request.terminalRef,
-        terminalPid: request.terminalPid,
-    });
-    if (request.launchId)
-        pendingLaunchTaskIdByLaunchId.set(request.launchId, session.id);
-    debugTerminalUpdate('session created from deep link', {
-        id: session.id,
-        status: session.status,
-        shellType: session.shellType,
-        terminalRef: session.terminalRef,
-        terminalPid: session.terminalPid,
-        hasCommand: Boolean(session.cmd),
-    });
-    (0, settings_1.saveSessions)(getSessionsStateToSave());
-    flushPendingTerminalUpdates(session.id);
-    flushPendingTerminalEvents(session.id);
-    if (!request.terminalRef)
-        void openSessionInVsCode(session);
-    if (mainWindow) {
-        if (mainWindow.isMinimized())
-            mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
-    }
+    writeJsonResponse(response, 200, { ok: true });
 }
-function parseDeepLinkPayload(rawPayload) {
-    let current = rawPayload;
-    for (let i = 0; i < 3; i += 1) {
-        try {
-            return JSON.parse(current);
-        }
-        catch {
-            let decoded;
-            try {
-                decoded = decodeURIComponent(current);
+function readHttpBody(request) {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        let bodyBytes = 0;
+        let rejected = false;
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => {
+            if (rejected)
+                return;
+            bodyBytes += Buffer.byteLength(chunk, 'utf8');
+            if (bodyBytes > MAX_TERMINAL_EVENT_BODY_BYTES) {
+                rejected = true;
+                reject(new HttpBodyTooLargeError('request payload is too large'));
+                return;
             }
-            catch {
-                break;
-            }
-            if (decoded === current)
-                break;
-            current = decoded;
-        }
-    }
-    throw new Error('Invalid payload JSON');
+            body += chunk;
+        });
+        request.on('end', () => {
+            if (!rejected)
+                resolve(body);
+        });
+        request.on('error', error => {
+            if (!rejected)
+                reject(error);
+        });
+    });
+}
+function writeJsonResponse(response, statusCode, body) {
+    const encodedBody = JSON.stringify(body);
+    response.writeHead(statusCode, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(encodedBody),
+    });
+    response.end(encodedBody);
 }
 function setupLegacyIpc() {
     electron_1.ipcMain.handle('session:create', (_e, name, cmd, cwd, shellType, sshCommand = '') => {
@@ -4432,28 +3332,20 @@ function setupLegacyIpc() {
                 hasCommand: Boolean(session.cmd),
             });
             (0, settings_1.saveSessions)(getSessionsStateToSave());
-            void openSessionInVsCode(session);
         }
         return session;
     });
     electron_1.ipcMain.handle('session:remove', async (_e, id) => {
         try {
-            const session = sessionManager?.getSession(id);
-            if (session)
-                queueDisconnectSessionCommand(session);
             if (shouldBackendOwnState()) {
                 await backendPost('/api/session/remove', { id });
             }
             else {
-                if (session?.status === 'detached' || session?.status === 'stopped' || session?.status === 'error') {
-                    markSessionRemoved(id);
-                    sessionManager?.removeSession(id);
-                }
-                else {
-                    sessionManager?.detachSession(id);
-                }
-                (0, settings_1.saveSessions)(getSessionsStateToSave());
+                // Always remove the session completely, regardless of status
+                sessionManager?.removeSession(id);
             }
+            // Always save sessions after removal
+            (0, settings_1.saveSessions)(getSessionsStateToSave());
         }
         catch (error) {
             console.error(`Failed to remove session: ${getErrorMessage(error)}`);
@@ -4478,6 +3370,20 @@ function setupLegacyIpc() {
         (0, settings_1.saveSessions)(getSessionsStateToSave());
         return session;
     });
+    electron_1.ipcMain.handle('session:pause', (_e, id) => {
+        const sessionId = typeof id === 'string' ? id.trim() : '';
+        if (!sessionId) {
+            console.error('Failed to pause session: missing session id');
+            return null;
+        }
+        const session = sessionManager?.pauseSession(sessionId) ?? null;
+        if (!session) {
+            console.error(`Failed to pause session: session "${sessionId}" was not found`);
+            return null;
+        }
+        debugTerminalUpdate('session paused', { id: session.id, status: session.status });
+        return session;
+    });
     electron_1.ipcMain.handle('session:list', () => {
         sessionManager?.refreshGitChanges();
         return sessionManager?.getSessions() ?? [];
@@ -4489,24 +3395,6 @@ function setupLegacyIpc() {
             if (err)
                 console.error('Failed to open review tool:', err.message);
         });
-    });
-    electron_1.ipcMain.handle('editor:open-vscode', async (_e, session) => {
-        if (!isVsCodeSessionRequest(session)) {
-            console.error('Failed to open VS Code: invalid session payload');
-            return false;
-        }
-        if (session.shellType === 'ssh') {
-            if (!session.sshCommand?.trim()) {
-                console.error('Failed to open VS Code: missing SSH command');
-                return false;
-            }
-        }
-        else if (!session.cwd.trim()) {
-            console.error('Failed to open VS Code: missing session path');
-            return false;
-        }
-        const refreshedSession = sessionManager?.touchSession(session.id) ?? session;
-        return openSessionInVsCode(refreshedSession);
     });
     electron_1.ipcMain.handle('session:pick-dir', async () => {
         if (!mainWindow)
@@ -4575,10 +3463,7 @@ function setupBackendIpc() {
                 shellType,
                 sshCommand,
             });
-            const session = result.session;
-            if (session)
-                void openSessionInVsCodeWithBackend(session);
-            return session;
+            return result.session;
         }
         catch (error) {
             console.error(`Failed to create session: ${getErrorMessage(error)}`);
@@ -4594,6 +3479,35 @@ function setupBackendIpc() {
             console.error(`Failed to rename session: ${getErrorMessage(error)}`);
             return null;
         }
+    });
+    electron_1.ipcMain.handle('session:remove', async (_e, id) => {
+        const sessionId = typeof id === 'string' ? id.trim() : '';
+        if (!sessionId) {
+            console.error('Failed to remove session: missing session id');
+            return false;
+        }
+        try {
+            await backendPost('/api/session/remove', { id: sessionId });
+            return true;
+        }
+        catch (error) {
+            console.error(`Failed to remove session: ${getErrorMessage(error)}`);
+            return false;
+        }
+    });
+    electron_1.ipcMain.handle('session:pause', (_e, id) => {
+        const sessionId = typeof id === 'string' ? id.trim() : '';
+        if (!sessionId) {
+            console.error('Failed to pause session: missing session id');
+            return null;
+        }
+        const session = sessionManager?.pauseSession(sessionId) ?? null;
+        if (!session) {
+            console.error(`Failed to pause session: session "${sessionId}" was not found`);
+            return null;
+        }
+        debugTerminalUpdate('session paused', { id: session.id, status: session.status });
+        return session;
     });
     electron_1.ipcMain.handle('session:list', async () => {
         try {
@@ -4613,26 +3527,6 @@ function setupBackendIpc() {
             if (err)
                 console.error('Failed to open review tool:', err.message);
         });
-    });
-    electron_1.ipcMain.handle('editor:open-vscode', async (_e, session) => {
-        if (!isVsCodeSessionRequest(session)) {
-            console.error('Failed to open VS Code: invalid session payload');
-            return false;
-        }
-        if (session.shellType === 'ssh') {
-            if (!session.sshCommand?.trim()) {
-                console.error('Failed to open VS Code: missing SSH command');
-                return false;
-            }
-        }
-        else if (!session.cwd.trim()) {
-            console.error('Failed to open VS Code: missing session path');
-            return false;
-        }
-        const touched = await backendPost('/api/session/touch', { id: session.id })
-            .then(result => result.session ?? session)
-            .catch(() => session);
-        return openSessionInVsCodeWithBackend(touched);
     });
     electron_1.ipcMain.handle('session:pick-dir', async () => {
         if (!mainWindow)
@@ -4766,7 +3660,279 @@ function setupIpc() {
     else {
         setupLegacyIpc();
     }
+    setupSharedIpc();
     setupGoogleCalendarIpc();
+}
+function setupSharedIpc() {
+    electron_1.ipcMain.handle('shell:get-config', () => ({
+        url: process.env['MULTITASKER_SHELL_SERVER_URL']?.trim() || 'ws://127.0.0.1:4321',
+        token: process.env['SHELL_AUTH_TOKEN'] || '',
+    }));
+    electron_1.ipcMain.handle('shell:create-pty', async (_e, cwdArg, nameArg) => {
+        const cwd = typeof cwdArg === 'string' && cwdArg.trim()
+            ? cwdArg.trim()
+            : (process.env['USERPROFILE'] || process.env['HOME'] || process.cwd());
+        const settings = (0, settings_1.loadSettings)();
+        const localShell = settings.defaultShell === 'bash' ? 'bash' : 'powershell';
+        try {
+            const pty = await (0, shellServerClient_1.createShellPty)({ cwd, track: false });
+            const shortId = pty.sessionId.slice(0, 8);
+            const name = typeof nameArg === 'string' && nameArg.trim() ? nameArg.trim() : `shell ${shortId}`;
+            if (shouldBackendOwnState()) {
+                try {
+                    const result = await backendPost('/api/session/create', {
+                        name,
+                        cmd: '',
+                        cwd: pty.cwd,
+                        shellType: localShell,
+                        requestedId: pty.sessionId,
+                    });
+                    return result.session ?? null;
+                }
+                catch (error) {
+                    console.error(`Failed to register shell PTY with backend: ${getErrorMessage(error)}`);
+                    return null;
+                }
+            }
+            const session = sessionManager?.createSession(name, '', pty.cwd, localShell, pty.sessionId) ?? null;
+            if (session) {
+                debugTerminalUpdate('shell pty created from app', {
+                    id: session.id,
+                    pid: pty.pid,
+                    shell: pty.shell,
+                });
+                (0, settings_1.saveSessions)(getSessionsStateToSave());
+            }
+            return session;
+        }
+        catch (error) {
+            console.error(`Failed to create shell PTY: ${getErrorMessage(error)}`);
+            return null;
+        }
+    });
+    electron_1.ipcMain.handle('shell:create-ssh', async (_e, optsArg) => {
+        const opts = (optsArg && typeof optsArg === 'object') ? optsArg : {};
+        const host = typeof opts.host === 'string' ? opts.host.trim() : '';
+        const username = typeof opts.username === 'string' ? opts.username.trim() : '';
+        if (!host || !username) {
+            console.error('shell:create-ssh missing host/username');
+            return null;
+        }
+        const port = typeof opts.port === 'number' && opts.port > 0 ? opts.port : 22;
+        const sshOpts = { host, username, port };
+        if (typeof opts.privateKeyPath === 'string' && opts.privateKeyPath.trim())
+            sshOpts.privateKeyPath = opts.privateKeyPath.trim();
+        if (typeof opts.passphrase === 'string')
+            sshOpts.passphrase = opts.passphrase;
+        if (typeof opts.agent === 'string' && opts.agent.trim())
+            sshOpts.agent = opts.agent.trim();
+        if (typeof opts.initCommand === 'string' && opts.initCommand.trim())
+            sshOpts.initCommand = opts.initCommand.trim();
+        try {
+            const ssh = await (0, shellServerClient_1.createShellSsh)(sshOpts);
+            const shortId = ssh.sessionId.slice(0, 8);
+            const baseName = typeof opts.name === 'string' && opts.name.trim()
+                ? opts.name.trim()
+                : `ssh ${username}@${host}${port !== 22 ? ":" + port : ""} ${shortId}`;
+            const sessionSshOptions = { host, username };
+            if (port !== 22)
+                sessionSshOptions.port = port;
+            if (sshOpts.privateKeyPath)
+                sessionSshOptions.privateKeyPath = sshOpts.privateKeyPath;
+            if (sshOpts.agent)
+                sessionSshOptions.agent = sshOpts.agent;
+            if (sshOpts.initCommand)
+                sessionSshOptions.initCommand = sshOpts.initCommand;
+            if (shouldBackendOwnState()) {
+                try {
+                    const result = await backendPost('/api/session/create', {
+                        name: baseName,
+                        cmd: '',
+                        cwd: ssh.cwd || '',
+                        shellType: 'ssh',
+                        sshCommand: `${username}@${host}${port !== 22 ? ":" + port : ""}`,
+                        sshOptions: sessionSshOptions,
+                        requestedId: ssh.sessionId,
+                    });
+                    return result.session ?? null;
+                }
+                catch (error) {
+                    console.error(`Failed to register SSH session with backend: ${getErrorMessage(error)}`);
+                    return null;
+                }
+            }
+            const session = sessionManager?.createSession(baseName, '', ssh.cwd || '', 'ssh', ssh.sessionId, `${username}@${host}${port !== 22 ? ":" + port : ""}`, '', undefined, sessionSshOptions) ?? null;
+            if (session) {
+                debugTerminalUpdate('shell ssh created from app', {
+                    id: session.id,
+                    host,
+                    username,
+                });
+                (0, settings_1.saveSessions)(getSessionsStateToSave());
+            }
+            return session;
+        }
+        catch (error) {
+            console.error(`Failed to create SSH session: ${getErrorMessage(error)}`);
+            return null;
+        }
+    });
+    electron_1.ipcMain.handle('shell:reconnect-ssh', async (_e, idArg) => {
+        const sessionId = typeof idArg === 'string' ? idArg.trim() : '';
+        if (!sessionId) {
+            return { ok: false, error: 'missing_session_id' };
+        }
+        return reconnectShellSshSession(sessionId);
+    });
+    electron_1.ipcMain.handle('shell:focus-vscode', async (_e, idArg) => {
+        const sessionId = typeof idArg === 'string' ? idArg.trim() : '';
+        if (!sessionId)
+            return { ok: false, error: 'missing_session_id' };
+        return focusVscodeForSession(sessionId);
+    });
+}
+// In-flight reconnect promises keyed by session id. Used so concurrent
+// renderer requests for the same session collapse into one supervisor call —
+// otherwise the supervisor would reject the second spawn with
+// "session already exists" even though the reconnect actually succeeded.
+const sshReconnectInFlight = new Map();
+async function reconnectShellSshSession(sessionId) {
+    const existing = sshReconnectInFlight.get(sessionId);
+    if (existing)
+        return existing;
+    const promise = (async () => {
+        try {
+            const session = await lookupSessionForReconnect(sessionId);
+            if (!session)
+                return { ok: false, error: 'session_not_found' };
+            if (session.shellType !== 'ssh')
+                return { ok: false, error: 'not_ssh_session' };
+            const status = session.status;
+            if (status === 'error' || status === 'stopped' || status === 'detached') {
+                return { ok: false, error: `session_not_reconnectable:${status}` };
+            }
+            if (typeof session.terminalExitCode === 'number') {
+                return { ok: false, error: 'session_already_exited' };
+            }
+            const sshOpts = buildSshConnectOptions(session);
+            if (!sshOpts)
+                return { ok: false, error: 'ssh_options_missing' };
+            try {
+                await (0, shellServerClient_1.createShellSsh)({ ...sshOpts, sessionId });
+            }
+            catch (error) {
+                const message = getErrorMessage(error);
+                // Supervisor may have a stale session from a previous reconnect
+                // race — treat that as success and let the renderer attach.
+                if (/already\s*exists/i.test(message)) {
+                    debugTerminalUpdate('shell ssh reconnect idempotent', { id: sessionId });
+                    return { ok: true, sessionId };
+                }
+                debugTerminalUpdate('shell ssh reconnect failed', { id: sessionId, error: message });
+                return { ok: false, error: message };
+            }
+            debugTerminalUpdate('shell ssh reconnect ok', {
+                id: sessionId,
+                host: sshOpts.host,
+                username: sshOpts.username,
+            });
+            if (!shouldBackendOwnState() && sessionManager) {
+                sessionManager.touchSession(sessionId);
+                (0, settings_1.saveSessions)(getSessionsStateToSave());
+            }
+            return { ok: true, sessionId };
+        }
+        catch (error) {
+            return { ok: false, error: getErrorMessage(error) };
+        }
+    })();
+    sshReconnectInFlight.set(sessionId, promise);
+    try {
+        return await promise;
+    }
+    finally {
+        sshReconnectInFlight.delete(sessionId);
+    }
+}
+async function lookupSessionForReconnect(sessionId) {
+    if (shouldBackendOwnState()) {
+        return backendState.sessions.find(s => s.id === sessionId) ?? null;
+    }
+    return sessionManager?.getSession(sessionId) ?? null;
+}
+async function focusVscodeForSession(sessionId) {
+    const session = await lookupSessionForReconnect(sessionId);
+    if (!session)
+        return { ok: false, error: 'session_not_found' };
+    const meta = session.clientMetadata;
+    if (!meta || meta.kind !== 'vscode')
+        return { ok: false, error: 'no_vscode_metadata' };
+    const workspace = meta.workspace || session.cwd || '';
+    if (!workspace)
+        return { ok: false, error: 'no_workspace' };
+    // Spawn `code --reuse-window <workspace>`. Setting VSCODE_IPC_HOOK_CLI in
+    // the env makes the CLI talk to the *originating* VS Code instance (the one
+    // that opened this terminal), so the right window is focused instead of
+    // potentially opening a new one.
+    const env = { ...process.env };
+    if (meta.ipcHook)
+        env['VSCODE_IPC_HOOK_CLI'] = meta.ipcHook;
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows ? 'code.cmd' : 'code';
+    try {
+        const child = (0, node_child_process_1.spawn)(cmd, ['--reuse-window', workspace], {
+            env,
+            detached: true,
+            stdio: 'ignore',
+            shell: isWindows,
+        });
+        child.on('error', (err) => {
+            console.error('[focus-vscode] spawn failed', err.message);
+        });
+        child.unref();
+        return { ok: true };
+    }
+    catch (e) {
+        return { ok: false, error: e.message };
+    }
+}
+function buildSshConnectOptions(session) {
+    if (session.sshOptions && session.sshOptions.host && session.sshOptions.username) {
+        const o = session.sshOptions;
+        const opts = {
+            host: o.host,
+            username: o.username,
+            port: o.port ?? 22,
+        };
+        if (o.privateKeyPath)
+            opts.privateKeyPath = o.privateKeyPath;
+        if (o.agent)
+            opts.agent = o.agent;
+        if (o.initCommand)
+            opts.initCommand = o.initCommand;
+        return opts;
+    }
+    const parsed = parseSshCommand(session.sshCommand);
+    if (!parsed)
+        return null;
+    return { host: parsed.host, username: parsed.username, port: parsed.port };
+}
+function parseSshCommand(value) {
+    if (!value)
+        return null;
+    const trimmed = value.trim();
+    // user@host[:port] — does not handle IPv6 with brackets; falls back to null.
+    const m = /^([^@\s]+)@([^@:\s]+)(?::(\d+))?$/.exec(trimmed);
+    if (!m)
+        return null;
+    const username = m[1];
+    const host = m[2];
+    if (!username || !host)
+        return null;
+    const port = m[3] ? parseInt(m[3], 10) : 22;
+    if (!Number.isFinite(port) || port <= 0)
+        return null;
+    return { username, host, port };
 }
 function setupGoogleCalendarIpc() {
     electron_1.ipcMain.handle('google-calendar:list', () => googleCalendarEvents.map(cloneGoogleCalendarEvent));
@@ -4787,17 +3953,19 @@ function getSessionsStateToSave() {
         cwd: s.cwd,
         shellType: s.shellType,
         ...(s.sshCommand ? { sshCommand: s.sshCommand } : {}),
-        ...(s.vscodeWindowId ? { vscodeWindowId: s.vscodeWindowId } : {}),
+        ...(s.sshOptions ? { sshOptions: s.sshOptions } : {}),
         ...(s.terminalRef ? { terminalRef: s.terminalRef } : {}),
         ...(s.terminalPid !== undefined ? { terminalPid: s.terminalPid } : {}),
     }));
 }
 function restorePersistedSessions(settings) {
     const persistedSessions = (0, settings_1.loadSessions)();
-    persistedSessions.forEach(sessionState => {
+    persistedSessions
+        .filter(s => s.status !== 'stopped' && s.status !== 'error' && s.status !== 'detached')
+        .forEach(sessionState => {
         const rawShellType = String(sessionState.shellType);
         const shellType = isShellType(rawShellType) ? rawShellType : settings.defaultShell;
-        sessionManager?.createSession(sessionState.name, sessionState.cmd, sessionState.cwd, shellType, sessionState.id ?? '', sessionState.sshCommand ?? '', sessionState.vscodeWindowId ?? '', sessionState.terminalRef ?? '', sessionState.terminalPid);
+        sessionManager?.createSession(sessionState.name, sessionState.cmd, sessionState.cwd, shellType, sessionState.id ?? '', sessionState.sshCommand ?? '', sessionState.terminalRef ?? '', sessionState.terminalPid, sessionState.sshOptions);
     });
     for (const session of sessionManager?.getSessions() ?? []) {
         if (session.terminalRef)
@@ -4916,7 +4084,7 @@ function createWindow() {
     }
     restorePersistedGoogleCalendarEvents();
     startGoogleCalendarScheduler();
-    void mainWindow.loadFile(node_path_1.default.join(__dirname, '..', '..', 'index.html'));
+    void mainWindow.loadFile(node_path_1.default.join(__dirname, '..', '..', 'desktop', 'index.html'));
 }
 setupIpc();
 const hasSingleInstanceLock = electron_1.app.requestSingleInstanceLock();
@@ -4924,27 +4092,17 @@ if (!hasSingleInstanceLock) {
     electron_1.app.quit();
 }
 else {
-    electron_1.app.on('second-instance', (_event, argv) => {
-        const deepLink = getDeepLinkFromArgv(argv);
-        if (deepLink)
-            enqueueDeepLink(deepLink);
+    electron_1.app.on('second-instance', () => {
+        if (!mainWindow)
+            return;
+        if (mainWindow.isMinimized())
+            mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
     });
 }
-electron_1.app.on('open-url', (event, url) => {
-    event.preventDefault();
-    enqueueDeepLink(url);
-});
-const startupDeepLink = getDeepLinkFromArgv(process.argv);
-if (startupDeepLink)
-    enqueueDeepLink(startupDeepLink);
 void electron_1.app.whenReady().then(async () => {
     (0, settings_1.setStorageDirectory)(electron_1.app.getPath('userData'));
-    if (process.defaultApp && process.argv[1]) {
-        electron_1.app.setAsDefaultProtocolClient(MULTITASKER_PROTOCOL, process.execPath, [node_path_1.default.resolve(process.argv[1])]);
-    }
-    else {
-        electron_1.app.setAsDefaultProtocolClient(MULTITASKER_PROTOCOL);
-    }
     if (shouldBackendOwnState()) {
         await startTerminalUpdateServer();
         createWindow();
@@ -4954,7 +4112,6 @@ void electron_1.app.whenReady().then(async () => {
         await startTerminalUpdateServer();
     }
     startSlackSocketListener({ notifyIfMissingConfig: false });
-    flushPendingDeepLinks();
     electron_1.app.on('activate', () => {
         if (electron_1.BrowserWindow.getAllWindows().length === 0) {
             createWindow();

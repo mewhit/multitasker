@@ -4,7 +4,7 @@ import {
   loadRecurringTasks,
   loadSlackNotifications,
 } from '../../../desktop/settings';
-import { sessionManager, taskIdByTerminalRef } from '../../state/sessions';
+import { sessionManager, taskIdByTerminalRef, multitaskerSessionIdByShellSessionId } from '../../state/sessions';
 import { manualTasks, recurringTasks, slackNotifications } from '../../state/tasks';
 import { MAX_MANUAL_TASKS, MAX_RECURRING_TASKS, MAX_SLACK_NOTIFICATIONS } from '../../core/constants';
 import { isShellType } from '../../utils/types';
@@ -21,13 +21,20 @@ export function restorePersistedState(): void {
       shellType,
       sessionState.id ?? '',
       sessionState.sshCommand ?? '',
-      sessionState.vscodeWindowId ?? '',
       sessionState.terminalRef ?? '',
-      sessionState.terminalPid
+      sessionState.terminalPid,
+      sessionState.sshOptions
     );
+    if (sessionState.clientMetadata && sessionState.id) {
+      sessionManager.setClientMetadata(sessionState.id, sessionState.clientMetadata);
+    }
   }
   for (const session of sessionManager.getSessions()) {
     if (session.terminalRef) taskIdByTerminalRef.set(session.terminalRef, session.id);
+    // Pre-seed the shell→multitasker id map for restored sessions so that
+    // /api/shell/agent-status updates from the gateway resolve immediately
+    // (they're conflated by design — see createSession with requestedId).
+    multitaskerSessionIdByShellSessionId.set(session.id, session.id);
   }
   manualTasks.push(...loadManualTasks().slice(0, MAX_MANUAL_TASKS));
   recurringTasks.push(...loadRecurringTasks().slice(0, MAX_RECURRING_TASKS));

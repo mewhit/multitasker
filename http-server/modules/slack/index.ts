@@ -71,7 +71,7 @@ function getSlackRoutes(): RouteDef[] {
 }
 
 async function handleGetSlackNotifications(ctx: RouteContext): Promise<void> {
-  writeJsonResponse(ctx.response, 200, slackNotifications.map(cloneSlackNotification));
+  writeJsonResponse(ctx.response, 200, { ok: true, slackNotifications: slackNotifications.map(cloneSlackNotification) });
 }
 
 async function handlePostSlackNotification(ctx: RouteContext): Promise<void> {

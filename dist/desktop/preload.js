@@ -3,17 +3,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     createSession: (name, cmd, cwd, shellType, sshCommand = '') => electron_1.ipcRenderer.invoke('session:create', name, cmd, cwd, shellType, sshCommand),
+    createShellPty: (cwd, name) => electron_1.ipcRenderer.invoke('shell:create-pty', cwd, name),
+    createShellSsh: (opts) => electron_1.ipcRenderer.invoke('shell:create-ssh', opts),
+    reconnectShellSsh: (sessionId) => electron_1.ipcRenderer.invoke('shell:reconnect-ssh', sessionId),
+    focusVscode: (sessionId) => electron_1.ipcRenderer.invoke('shell:focus-vscode', sessionId),
+    getShellServerConfig: () => electron_1.ipcRenderer.invoke('shell:get-config'),
     removeSession: (id) => electron_1.ipcRenderer.invoke('session:remove', id),
+    pauseSession: (id) => electron_1.ipcRenderer.invoke('session:pause', id),
     renameSession: (id, name) => electron_1.ipcRenderer.invoke('session:rename', id, name),
     openReview: (cwd) => electron_1.ipcRenderer.invoke('session:open-review', cwd),
-    openVsCode: (session) => electron_1.ipcRenderer.invoke('editor:open-vscode', session),
     pickDirectory: () => electron_1.ipcRenderer.invoke('session:pick-dir'),
     getSessions: () => electron_1.ipcRenderer.invoke('session:list'),
     onListUpdate: (cb) => {
         electron_1.ipcRenderer.on('session:list-update', (_event, sessions) => cb(sessions));
-    },
-    onVsCodeFocusFailed: (cb) => {
-        electron_1.ipcRenderer.on('editor:vscode-focus-failed', (_event, payload) => cb(payload));
     },
     getManualTasks: () => electron_1.ipcRenderer.invoke('manual-task:list'),
     addManualTask: (text) => electron_1.ipcRenderer.invoke('manual-task:add', text),

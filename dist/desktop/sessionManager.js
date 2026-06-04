@@ -12,10 +12,9 @@ class SessionManager extends node_events_1.EventEmitter {
     sessions = new Map();
     updateTimeout = null;
     terminalEventParser = new terminalEvents_1.TerminalEventParser();
-    createSession(name, cmd, cwd, shellType = 'powershell', requestedId = '', sshCommand = '', vscodeWindowId = '', terminalRef = '', terminalPid) {
+    createSession(name, cmd, cwd, shellType = 'powershell', requestedId = '', sshCommand = '', terminalRef = '', terminalPid, sshOptions) {
         const id = requestedId.trim() || (0, node_crypto_1.randomUUID)();
         const trimmedSshCommand = sshCommand.trim();
-        const trimmedVsCodeWindowId = vscodeWindowId.trim();
         const trimmedTerminalRef = terminalRef.trim();
         const effectiveCwd = shellType === 'ssh'
             ? cwd.trim()
@@ -33,8 +32,12 @@ class SessionManager extends node_events_1.EventEmitter {
             else {
                 delete existingEntry.session.sshCommand;
             }
-            if (trimmedVsCodeWindowId)
-                existingEntry.session.vscodeWindowId = trimmedVsCodeWindowId;
+            if (sshOptions) {
+                existingEntry.session.sshOptions = sshOptions;
+            }
+            else if (shellType !== 'ssh') {
+                delete existingEntry.session.sshOptions;
+            }
             if (trimmedTerminalRef)
                 existingEntry.session.terminalRef = trimmedTerminalRef;
             if (terminalPid !== undefined)
@@ -66,8 +69,8 @@ class SessionManager extends node_events_1.EventEmitter {
         };
         if (trimmedSshCommand)
             session.sshCommand = trimmedSshCommand;
-        if (trimmedVsCodeWindowId)
-            session.vscodeWindowId = trimmedVsCodeWindowId;
+        if (sshOptions)
+            session.sshOptions = sshOptions;
         if (trimmedTerminalRef)
             session.terminalRef = trimmedTerminalRef;
         if (terminalPid !== undefined)
@@ -102,6 +105,8 @@ class SessionManager extends node_events_1.EventEmitter {
             return null;
         if (entry.session.status === 'detached')
             return { ...entry.session };
+        if (entry.session.status === 'paused' && update.status !== 'running')
+            return { ...entry.session };
         if (update.occurredAt < entry.lastTerminalUpdateAt)
             return { ...entry.session };
         return this.applyTerminalUpdate(entry, update);
@@ -119,8 +124,6 @@ class SessionManager extends node_events_1.EventEmitter {
         if (event.occurredAt < entry.lastTerminalUpdateAt)
             return { session: { ...entry.session } };
         const terminalBinding = {};
-        if (event.windowId)
-            terminalBinding.vscodeWindowId = event.windowId;
         if (event.terminalRef)
             terminalBinding.terminalRef = event.terminalRef;
         if (event.terminalPid !== undefined)
@@ -137,18 +140,34 @@ class SessionManager extends node_events_1.EventEmitter {
                 this.emitUpdateDebounced();
             return { session: { ...entry.session } };
         }
+        if (entry.session.status === 'paused' && update.status !== 'running') {
+            entry.lastTerminalUpdateAt = event.occurredAt;
+            if (bindingChanged)
+                this.emitUpdateDebounced();
+            return { session: { ...entry.session } };
+        }
         const session = this.applyTerminalUpdate(entry, update);
         if (bindingChanged)
             this.emitUpdateDebounced();
         return { session, statusUpdate: update };
     }
-    bindSessionToVsCodeWindow(id, windowId) {
+    pauseSession(id) {
         const entry = this.sessions.get(id);
         if (!entry)
             return null;
-        const windowOwnerChanged = this.updateSessionTerminalBinding(entry, { vscodeWindowId: windowId });
-        if (windowOwnerChanged)
-            this.emitUpdateDebounced();
+        if (entry.session.status === 'paused')
+            return { ...entry.session };
+        if (entry.session.status === 'error' ||
+            entry.session.status === 'stopped' ||
+            entry.session.status === 'detached') {
+            return { ...entry.session };
+        }
+        const now = Date.now();
+        entry.session.status = 'paused';
+        entry.session.lastActivity = now;
+        entry.statusChangedAt = now;
+        entry.lastEffectiveUpdateAt = now;
+        this.emit('sessionUpdate', this.getSessions());
         return { ...entry.session };
     }
     bindSessionToTerminal(id, binding) {
@@ -182,16 +201,38 @@ class SessionManager extends node_events_1.EventEmitter {
         }
         return { ...entry.session };
     }
+    setClientMetadata(id, metadata) {
+        const entry = this.sessions.get(id);
+        if (!entry)
+            return null;
+        if (metadata === null) {
+            if (entry.session.clientMetadata !== undefined) {
+                delete entry.session.clientMetadata;
+                this.emit('sessionUpdate', this.getSessions());
+            }
+            return { ...entry.session };
+        }
+        const prev = entry.session.clientMetadata;
+        const changed = !prev ||
+            prev.kind !== metadata.kind ||
+            prev.workspace !== metadata.workspace ||
+            prev.ipcHook !== metadata.ipcHook ||
+            prev.pid !== metadata.pid ||
+            prev.version !== metadata.version ||
+            prev.termProgram !== metadata.termProgram;
+        if (changed) {
+            entry.session.clientMetadata = { ...metadata };
+            this.emit('sessionUpdate', this.getSessions());
+        }
+        return { ...entry.session };
+    }
     restoreDetachedSessionFromTerminalEvent(entry, event) {
         if (event.type === 'terminal_closed' || event.type === 'terminal_disconnected')
             return false;
-        const eventWindowId = event.windowId?.trim();
-        const sessionWindowId = entry.session.vscodeWindowId?.trim();
         const eventTerminalRef = event.terminalRef?.trim();
         const sessionTerminalRef = entry.session.terminalRef?.trim();
-        const windowMatches = Boolean(eventWindowId && sessionWindowId && eventWindowId === sessionWindowId);
         const terminalMatches = Boolean(eventTerminalRef && sessionTerminalRef && eventTerminalRef === sessionTerminalRef);
-        if (!windowMatches && !terminalMatches)
+        if (!terminalMatches)
             return false;
         entry.session.status = INITIAL_SESSION_STATUS;
         entry.statusChangedAt = event.occurredAt;
@@ -202,11 +243,6 @@ class SessionManager extends node_events_1.EventEmitter {
     }
     updateSessionTerminalBinding(entry, binding) {
         let changed = false;
-        const normalizedWindowId = binding.vscodeWindowId?.trim();
-        if (normalizedWindowId && entry.session.vscodeWindowId !== normalizedWindowId) {
-            entry.session.vscodeWindowId = normalizedWindowId;
-            changed = true;
-        }
         const normalizedTerminalRef = binding.terminalRef?.trim();
         if (normalizedTerminalRef && entry.session.terminalRef !== normalizedTerminalRef) {
             entry.session.terminalRef = normalizedTerminalRef;

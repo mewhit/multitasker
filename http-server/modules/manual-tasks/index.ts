@@ -41,13 +41,6 @@ export const manualTasksModule: HttpModule = {
       },
       {
         method: 'POST',
-        path: '/extensions/vscode/tasks',
-        handler({ payload, response }) {
-          handleManualTaskAddPost(payload, response);
-        },
-      },
-      {
-        method: 'POST',
         path: '/api/manual-task/remove',
         handler({ payload, response }) {
           const id = readPayloadString(payload, 'id').trim();

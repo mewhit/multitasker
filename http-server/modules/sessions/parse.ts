@@ -15,7 +15,6 @@ export function parseCreateSessionRequest(payload: unknown): MultitaskerCreateSe
   const sshCommand = (readStringField(record, 'sshCommand') || readStringField(record, 'sshHost')).trim();
   const cmd = (readStringField(record, 'command') || readStringField(record, 'cmd')).trim();
   const name = readStringField(record, 'name').trim() || path.basename(cwd) || sshCommand || 'Session';
-  const vscodeWindowId = readStringField(record, 'windowId').trim();
   const terminalRef = readStringField(record, 'terminalRef').trim();
   const terminalName = readStringField(record, 'terminalName').trim();
   const launchId = readStringField(record, 'launchId').trim();
@@ -33,7 +32,6 @@ export function parseCreateSessionRequest(payload: unknown): MultitaskerCreateSe
   const request: MultitaskerCreateSessionRequest = { name, cmd, cwd, shellType };
   if (id) request.id = id;
   if (sshCommand) request.sshCommand = sshCommand;
-  if (vscodeWindowId) request.vscodeWindowId = vscodeWindowId;
   if (terminalRef) request.terminalRef = terminalRef;
   if (terminalPid !== undefined) request.terminalPid = terminalPid;
   if (terminalName) request.terminalName = terminalName;
@@ -51,8 +49,9 @@ export function getSessionsStateToSave(): SessionState[] {
       cwd: session.cwd,
       shellType: session.shellType,
       ...(session.sshCommand ? { sshCommand: session.sshCommand } : {}),
-      ...(session.vscodeWindowId ? { vscodeWindowId: session.vscodeWindowId } : {}),
+      ...(session.sshOptions ? { sshOptions: session.sshOptions } : {}),
       ...(session.terminalRef ? { terminalRef: session.terminalRef } : {}),
       ...(session.terminalPid !== undefined ? { terminalPid: session.terminalPid } : {}),
+      ...(session.clientMetadata ? { clientMetadata: session.clientMetadata } : {}),
     }));
 }

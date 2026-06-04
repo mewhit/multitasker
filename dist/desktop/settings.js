@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.setStorageDirectory = setStorageDirectory;
+exports.normalizeClientMetadata = normalizeClientMetadata;
 exports.loadSettings = loadSettings;
 exports.saveSettings = saveSettings;
 exports.loadSessions = loadSessions;
@@ -120,7 +121,7 @@ function normalizeSessionState(value) {
     const rawCwd = value['cwd'];
     const rawShellType = value['shellType'];
     const rawSshCommand = value['sshCommand'] ?? value['sshHost'];
-    const rawVsCodeWindowId = value['vscodeWindowId'];
+    const rawSshOptions = value['sshOptions'];
     const rawTerminalRef = value['terminalRef'];
     const terminalPid = readFiniteNumber(value, 'terminalPid');
     const cwd = typeof rawCwd === 'string' ? rawCwd.trim() : '';
@@ -138,25 +139,71 @@ function normalizeSessionState(value) {
         : node_path_1.default.basename(cwd) || sshCommand || 'Session';
     const cmd = typeof rawCmd === 'string' ? rawCmd : '';
     const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : undefined;
-    const vscodeWindowId = typeof rawVsCodeWindowId === 'string' && rawVsCodeWindowId.trim()
-        ? rawVsCodeWindowId.trim()
-        : undefined;
     const terminalRef = typeof rawTerminalRef === 'string' && rawTerminalRef.trim()
         ? rawTerminalRef.trim()
         : undefined;
+    const sshOptions = normalizeSessionSshOptions(rawSshOptions);
+    const clientMetadata = normalizeClientMetadata(value['clientMetadata']);
     const session = {
         name,
         cmd,
         cwd,
         shellType,
         ...(sshCommand ? { sshCommand } : {}),
-        ...(vscodeWindowId ? { vscodeWindowId } : {}),
+        ...(sshOptions ? { sshOptions } : {}),
         ...(terminalRef ? { terminalRef } : {}),
         ...(terminalPid !== null ? { terminalPid } : {}),
+        ...(clientMetadata ? { clientMetadata } : {}),
     };
     if (id)
         return { id, ...session };
     return session;
+}
+function normalizeSessionSshOptions(value) {
+    if (!isRecord(value))
+        return undefined;
+    const host = typeof value['host'] === 'string' ? value['host'].trim() : '';
+    const username = typeof value['username'] === 'string' ? value['username'].trim() : '';
+    if (!host || !username)
+        return undefined;
+    const opts = { host, username };
+    const rawPort = value['port'];
+    if (typeof rawPort === 'number' && Number.isFinite(rawPort) && rawPort > 0)
+        opts.port = rawPort;
+    const rawKey = value['privateKeyPath'];
+    if (typeof rawKey === 'string' && rawKey.trim())
+        opts.privateKeyPath = rawKey.trim();
+    const rawAgent = value['agent'];
+    if (typeof rawAgent === 'string' && rawAgent.trim())
+        opts.agent = rawAgent.trim();
+    const rawInit = value['initCommand'];
+    if (typeof rawInit === 'string' && rawInit.trim())
+        opts.initCommand = rawInit.trim();
+    return opts;
+}
+function normalizeClientMetadata(value) {
+    if (!isRecord(value))
+        return undefined;
+    const kind = typeof value['kind'] === 'string' ? value['kind'].trim() : '';
+    if (kind !== 'vscode')
+        return undefined;
+    const meta = { kind: 'vscode' };
+    const workspace = value['workspace'];
+    if (typeof workspace === 'string' && workspace.trim())
+        meta.workspace = workspace.trim();
+    const ipcHook = value['ipcHook'];
+    if (typeof ipcHook === 'string' && ipcHook.trim())
+        meta.ipcHook = ipcHook.trim();
+    const pid = value['pid'];
+    if (typeof pid === 'number' && Number.isFinite(pid) && pid > 0)
+        meta.pid = pid;
+    const version = value['version'];
+    if (typeof version === 'string' && version.trim())
+        meta.version = version.trim();
+    const termProgram = value['termProgram'];
+    if (typeof termProgram === 'string' && termProgram.trim())
+        meta.termProgram = termProgram.trim();
+    return meta;
 }
 function normalizeManualTask(value) {
     if (!isRecord(value))
@@ -336,6 +383,9 @@ function normalizeGoogleCalendarConnection(value) {
     const lastSyncedAt = readFiniteNumber(value, 'lastSyncedAt');
     if (lastSyncedAt !== null)
         connection.lastSyncedAt = lastSyncedAt;
+    const authError = readTrimmedString(value, 'authError');
+    if (authError)
+        connection.authError = authError;
     return connection;
 }
 function normalizeGoogleCalendarEvent(value) {

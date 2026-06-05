@@ -1171,7 +1171,6 @@
       let nextUpContextKey = "";
       let nextUpClockTimer = 0;
       let draggedNextUpKey = "";
-      let suppressNextUpClick = false;
       let activeId = null;
       let newShellType = "powershell";
       let renameSessionId = null;
@@ -1184,6 +1183,7 @@
       // ============================================================
       const shellPtyIds = new Set(loadShellPtyIds());
       let shellTerminalState = null; // {sessionId, ws, term, fitAddon, resizeObserver, onResize}
+      const TYPING_IDLE_MS = 1000;
       let shellMountToken = 0;
       // Diagnostic: track output bytes flowing into xterm, log per second when active.
       const shellOutputStats = { bytes: 0, chunks: 0, firstAt: 0 };
@@ -1243,8 +1243,29 @@
         // can both pass the `!shellTerminalState` guard in the caller, both
         // create xterm + WS, and end up with two clients attached to the
         // same PTY — every keystroke is then sent twice to the supervisor.
-        unmountShellTerminal();
+        // Only unmount if we're switching to a different session to avoid
+        // unnecessarily closing and recreating the WebSocket connection.
+        if (shellTerminalState && shellTerminalState.sessionId !== sessionId) {
+          unmountShellTerminal();
+        }
+        if (
+          shellTerminalState &&
+          shellTerminalState.sessionId === sessionId &&
+          !shellTerminalState.unmounted &&
+          (
+            (shellTerminalState.ws &&
+              (shellTerminalState.ws.readyState === WebSocket.OPEN ||
+                shellTerminalState.ws.readyState === WebSocket.CONNECTING)) ||
+            shellTerminalState.reconnectTimer
+          )
+        ) {
+          return;
+        }
         const myToken = ++shellMountToken;
+        // If we already have the same session mounted and attached, nothing to do
+        if (shellTerminalState && shellTerminalState.sessionId === sessionId && shellTerminalState.attached) {
+          return;
+        }
         if (typeof Terminal === "undefined") {
           setShellTerminalStatus("xterm.js failed to load (check node_modules/@xterm/xterm)", true);
           return;
@@ -1428,8 +1449,39 @@
           clickRefocus,
           onDragOver,
           onDrop,
+          isTyping: false,
+          typingTimer: null,
+          focusDisposable: null,
+          blurDisposable: null,
         };
         shellTerminalState = state;
+
+        const sendTerminalEvent = (payload) => {
+          if (state.unmounted || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+          try {
+            state.ws.send(JSON.stringify(payload));
+          } catch {}
+        };
+        const setTypingState = (isTyping) => {
+          if (state.isTyping === isTyping) return;
+          state.isTyping = isTyping;
+          sendTerminalEvent({
+            type: "user_typing",
+            sessionId,
+            isTyping,
+            occurredAt: Date.now(),
+          });
+        };
+        const bumpTyping = () => {
+          setTypingState(true);
+          if (state.typingTimer) {
+            try { clearTimeout(state.typingTimer); } catch {}
+          }
+          state.typingTimer = setTimeout(() => {
+            state.typingTimer = null;
+            setTypingState(false);
+          }, TYPING_IDLE_MS);
+        };
 
         // ResizeObserver fires in bursts on focus / layout reflow (scrollbars,
         // focus rings, devicePixelRatio changes). Sending a WS resize for each
@@ -1492,6 +1544,12 @@
               setShellTerminalStatus("Connected (pid " + (msg.pid || "?") + ") - click here if keys don't work");
               sendResize();
               refocus();
+              sendTerminalEvent({
+                type: "terminal_focus",
+                sessionId,
+                focused: document.activeElement === term.textarea,
+                occurredAt: Date.now(),
+              });
             } else if (msg.type === "output" && msg.sessionId === sessionId) {
               trackShellOutput(typeof msg.data === "string" ? msg.data.length : 0);
               if (msg.replay) {
@@ -1600,6 +1658,7 @@
             .replace(/\x1b\[\d+;\d+R/g, '')           // cursor pos ESC[24;1R
             .replace(/\x1bP[!>]\|[\dA-Fa-f]*\x1b\\/g, ''); // DECRQSS / tertiary DA
           if (!data) return;
+          bumpTyping();
           // Don't gate on state.attached: during a reconnect the renderer may
           // briefly be "not attached" while the WS server is replaying scrollback.
           // The supervisor is the source of truth — if the session is gone it
@@ -1607,6 +1666,22 @@
           try { state.ws.send(JSON.stringify({ type: "input", sessionId, data })); } catch {}
         });
         state.dataDisposable = dataDisposable;
+        state.focusDisposable = term.onFocus(() => {
+          sendTerminalEvent({
+            type: "terminal_focus",
+            sessionId,
+            focused: true,
+            occurredAt: Date.now(),
+          });
+        });
+        state.blurDisposable = term.onBlur(() => {
+          sendTerminalEvent({
+            type: "terminal_focus",
+            sessionId,
+            focused: false,
+            occurredAt: Date.now(),
+          });
+        });
 
         const onResize = () => scheduleResize();
         state.onResize = onResize;
@@ -1632,7 +1707,19 @@
           try { clearTimeout(state.reconnectTimer); } catch {}
           state.reconnectTimer = null;
         }
+        if (state.typingTimer) {
+          try { clearTimeout(state.typingTimer); } catch {}
+          state.typingTimer = null;
+        }
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          try {
+            state.ws.send(JSON.stringify({ type: "user_typing", sessionId: state.sessionId, isTyping: false, occurredAt: Date.now() }));
+            state.ws.send(JSON.stringify({ type: "terminal_focus", sessionId: state.sessionId, focused: false, occurredAt: Date.now() }));
+          } catch {}
+        }
         try { state.dataDisposable && state.dataDisposable.dispose(); } catch {}
+        try { state.focusDisposable && state.focusDisposable.dispose(); } catch {}
+        try { state.blurDisposable && state.blurDisposable.dispose(); } catch {}
         if (state.onResize) window.removeEventListener("resize", state.onResize);
         if (state.statusEl && state.statusFocus) {
           try { state.statusEl.removeEventListener("mousedown", state.statusFocus); } catch {}
@@ -2049,10 +2136,6 @@
         card.innerHTML = cardHTML(s);
         card.title = "Right-click for task options";
         card.addEventListener("click", () => {
-          if (suppressNextUpClick) {
-            suppressNextUpClick = false;
-            return;
-          }
           const currentSession = sessions.find((x) => x.id === card.dataset.id);
           if (!currentSession) return;
           activateSession(currentSession.id);
@@ -2074,10 +2157,6 @@
         card.innerHTML = slackNotificationHTML(notification);
         card.title = "Open in Slack";
         card.addEventListener("click", () => {
-          if (suppressNextUpClick) {
-            suppressNextUpClick = false;
-            return;
-          }
           openSlackNotification(notification.id);
         });
         return card;
@@ -2099,10 +2178,6 @@
         card.innerHTML = googleCalendarEventHTML(event);
         card.title = event.htmlLink ? "Open in Google Calendar" : "Right-click for event options";
         card.addEventListener("click", () => {
-          if (suppressNextUpClick) {
-            suppressNextUpClick = false;
-            return;
-          }
           openGoogleCalendarEvent(event.id);
         });
         return card;
@@ -2194,16 +2269,12 @@
         const targetBounds = event.currentTarget.getBoundingClientRect();
         const insertAfter = event.clientY > targetBounds.top + targetBounds.height / 2;
         moveNextUpItemTo(draggedNextUpKey, targetKey, insertAfter);
-        suppressNextUpClick = true;
       }
 
       function handleNextUpDragEnd(event) {
         event.currentTarget.classList.remove("dragging");
         document.querySelectorAll(".next-up-card.drag-over").forEach((card) => card.classList.remove("drag-over"));
         draggedNextUpKey = "";
-        setTimeout(() => {
-          suppressNextUpClick = false;
-        }, 150);
       }
 
       function openNextUpMenu(event, key) {
@@ -2742,7 +2813,9 @@
           return;
         }
 
-        if (shellTerminalState) unmountShellTerminal();
+        // Keep the existing shell WS alive when viewing non-terminal tasks.
+        // This avoids creating a new WS clientId every time the user switches
+        // away from and back to the same terminal task.
         terminalEl.classList.add("hidden");
         summaryEl.classList.remove("hidden");
         document.getElementById("summary-name").textContent = s.name;
@@ -2768,7 +2841,8 @@
 
       function clearDetail() {
         activeId = null;
-        unmountShellTerminal();
+        // Don't tear down the shell WS on selection clear; keep it warm so
+        // reselecting the same terminal task reuses the same connection.
         const terminalEl = document.getElementById("shell-terminal");
         if (terminalEl) terminalEl.classList.add("hidden");
         const title = document.getElementById("detail-title");

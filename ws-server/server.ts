@@ -1,4 +1,4 @@
-import { log } from '../shell/core/logger';
+import { log } from './logger';
 import { ipcPipePath } from '../shell/ipc/pipe';
 import { SupervisorClient } from './supervisor-client';
 import { startWsServer } from './ws-server';
@@ -45,4 +45,3 @@ main().catch((e: unknown) => {
   log.error('gateway crashed', { error: (e as Error).message });
   process.exit(1);
 });
-

@@ -9,12 +9,15 @@ import {
   HOST,
   PORT,
   PROTOCOL_VERSION,
-  MULTITASKER_BACKEND_URL,
-  MULTITASKER_INTEGRATION_ENABLED,
   defaultShell,
 } from '../shell/core/constants';
-import { log } from '../shell/core/logger';
-import { MultitaskerClient } from '../shell/core/multitasker-client';
+import { log } from './logger';
+import {
+  MULTITASKER_BACKEND_URL,
+  MULTITASKER_INTEGRATION_ENABLED,
+  MULTITASKER_SHELL_NAME_PREFIX,
+} from './constants';
+import { MultitaskerClient } from './multitasker-client';
 import {
   parseClientMessage,
   type ClientMessage,
@@ -23,6 +26,10 @@ import {
 } from '../shell/core/protocol';
 import { SupervisorClient } from './supervisor-client';
 import { OutputAnalyzer, debugLogAgentStatus, type AgentStatusChange } from './output-analyzer';
+import {
+  HttpSessionsClient,
+  type DesktopSessionInfo,
+} from './http-sessions-client';
 
 interface Client {
   id: string;
@@ -49,6 +56,10 @@ function isBashLikeShell(shellPath: string | undefined | null): boolean {
   if (!shellPath) return false;
   const base = String(shellPath).toLowerCase().split(/[\\/]/).pop() ?? '';
   return /(?:^|[._-])(?:bash|zsh|sh|fish|wsl)(?:\.exe)?$/.test(base);
+}
+
+function classifyShell(shellPath: string): 'powershell' | 'bash' {
+  return isBashLikeShell(shellPath) ? 'bash' : 'powershell';
 }
 
 function safeWsSend(client: Client, payload: string): void {
@@ -89,6 +100,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   /** clientId -> set of session ids that client is subscribed to. */
   const clientSubscriptions = new Map<string, Set<string>>();
   const analyzer = new OutputAnalyzer();
+  const httpSessions = new HttpSessionsClient();
   const multitasker = MULTITASKER_INTEGRATION_ENABLED
     ? new MultitaskerClient(MULTITASKER_BACKEND_URL)
     : null;
@@ -297,6 +309,43 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     }
   }
 
+  // Broadcast desktop session_updated event to all connected clients
+  function broadcastDesktopSessionUpdated(session: DesktopSessionInfo): void {
+    const msg: ServerMessage = {
+      type: 'desktop_session_updated',
+      session,
+    };
+    const serialized = JSON.stringify(msg);
+    for (const c of clients.values()) {
+      safeWsSend(c, serialized);
+    }
+  }
+
+  // Broadcast desktop session_removed event to all connected clients
+  function broadcastDesktopSessionRemoved(sessionId: string): void {
+    const msg: ServerMessage = {
+      type: 'desktop_session_removed',
+      sessionId,
+    };
+    const serialized = JSON.stringify(msg);
+    for (const c of clients.values()) {
+      safeWsSend(c, serialized);
+    }
+  }
+
+  async function sendDesktopSessionsSnapshot(
+    client: Client,
+    requestId?: string
+  ): Promise<void> {
+    const sessions = await httpSessions.listSessions();
+    send(client, {
+      type: 'desktop_sessions',
+      sessions,
+      ...(requestId !== undefined ? { id: requestId } : {}),
+    });
+  }
+
+
   // Periodic sweep: demote sessions that have been silently parked in
   // 'working' back to 'idle' after IDLE_TIMEOUT_MS of nothing happening.
   // Without this, the UI shows "running" forever for any session whose first
@@ -451,6 +500,9 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     clientDesiredSizes.delete(sessionId);
     effectiveSizes.delete(sessionId);
     for (const set of clientSubscriptions.values()) set.delete(sessionId);
+    if (multitasker) {
+      void multitasker.removeSession(sessionId);
+    }
   });
 
   supervisor.on('disconnected', () => {
@@ -544,6 +596,23 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     send(client, msg);
   }
 
+  function normalizeOccurredAt(value: unknown): number {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      return Date.now();
+    }
+    return value;
+  }
+
+  function broadcastSessionEvent(sessionId: string, msg: ServerMessage): void {
+    const serialized = JSON.stringify(msg);
+    const subs = sessionSubscribers.get(sessionId);
+    if (!subs) return;
+    for (const cid of subs) {
+      const c = clients.get(cid);
+      if (c) safeWsSend(c, serialized);
+    }
+  }
+
   function requireAuth(client: Client, msg: ClientMessage): boolean {
     if (client.authenticated) return true;
     sendError(client, 'unauthorized', 'authenticate with a `hello` message first', {
@@ -592,11 +661,13 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         if (!AUTH_TOKEN) {
           client.authenticated = true;
           send(client, { type: 'authenticated', ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          await sendDesktopSessionsSnapshot(client);
           return;
         }
         if (msg.token === AUTH_TOKEN) {
           client.authenticated = true;
           send(client, { type: 'authenticated', ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          await sendDesktopSessionsSnapshot(client);
         } else {
           sendError(client, 'unauthorized', 'invalid token', {
             ...(msg.id !== undefined ? { id: msg.id } : {}),
@@ -618,6 +689,11 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
           })),
           ...(msg.id !== undefined ? { id: msg.id } : {}),
         });
+        return;
+      }
+      case 'list_desktop_sessions': {
+        if (!requireAuth(client, msg)) return;
+        await sendDesktopSessionsSnapshot(client, msg.id);
         return;
       }
       case 'create_session': {
@@ -645,6 +721,18 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
             void multitasker.sendClientMetadata({
               shellSessionId: session.sessionId,
               clientMetadata: msg.clientMetadata,
+            });
+          }
+          if (multitasker && msg.track !== false && session.kind !== 'ssh') {
+            const shortId = session.sessionId.slice(0, 8);
+            const name = `${MULTITASKER_SHELL_NAME_PREFIX} ${shortId}`;
+            void multitasker.createSession({
+              name,
+              cmd: '',
+              cwd: session.cwd,
+              shellType: classifyShell(session.shell),
+              shellSessionId: session.sessionId,
+              requestedId: session.sessionId,
             });
           }
           send(client, {
@@ -718,6 +806,58 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
           type: 'detached',
           sessionId: msg.sessionId,
           ...(msg.id !== undefined ? { id: msg.id } : {}),
+        });
+        return;
+      }
+      case 'user_typing': {
+        if (!requireAuth(client, msg)) return;
+        if (!supervisor.getSession(msg.sessionId)) {
+          sendError(client, 'unknown_session', `no such session: ${msg.sessionId}`, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+          return;
+        }
+        const occurredAt = normalizeOccurredAt(msg.occurredAt);
+        analyzer.onUserTyping(msg.sessionId, !!msg.isTyping, occurredAt);
+        log.info('user_typing', {
+          clientId: client.id,
+          sessionId: msg.sessionId,
+          isTyping: !!msg.isTyping,
+          occurredAt,
+        });
+        broadcastSessionEvent(msg.sessionId, {
+          type: 'user_typing',
+          sessionId: msg.sessionId,
+          isTyping: !!msg.isTyping,
+          occurredAt,
+          sourceClientId: client.id,
+        });
+        return;
+      }
+      case 'terminal_focus': {
+        if (!requireAuth(client, msg)) return;
+        if (!supervisor.getSession(msg.sessionId)) {
+          sendError(client, 'unknown_session', `no such session: ${msg.sessionId}`, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+          return;
+        }
+        const occurredAt = normalizeOccurredAt(msg.occurredAt);
+        analyzer.onTerminalFocus(msg.sessionId, !!msg.focused, occurredAt);
+        log.info('terminal_focus', {
+          clientId: client.id,
+          sessionId: msg.sessionId,
+          focused: !!msg.focused,
+          occurredAt,
+        });
+        broadcastSessionEvent(msg.sessionId, {
+          type: 'terminal_focus',
+          sessionId: msg.sessionId,
+          focused: !!msg.focused,
+          occurredAt,
+          sourceClientId: client.id,
         });
         return;
       }
@@ -800,6 +940,48 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         supervisor.kill(msg.sessionId, msg.signal);
         return;
       }
+      case 'rename_session': {
+        if (!requireAuth(client, msg)) return;
+        const updated = await httpSessions.renameSession(msg.sessionId, msg.name);
+        if (updated) {
+          send(client, { type: 'desktop_session_updated', session: updated, ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          broadcastDesktopSessionUpdated(updated);
+        } else {
+          sendError(client, 'unknown_session', `failed to rename session: ${msg.sessionId}`, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+        }
+        return;
+      }
+      case 'remove_session': {
+        if (!requireAuth(client, msg)) return;
+        const success = await httpSessions.removeSession(msg.sessionId);
+        if (success) {
+          send(client, { type: 'desktop_session_removed', sessionId: msg.sessionId, ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          broadcastDesktopSessionRemoved(msg.sessionId);
+        } else {
+          sendError(client, 'unknown_session', `failed to remove session: ${msg.sessionId}`, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+        }
+        return;
+      }
+      case 'touch_session': {
+        if (!requireAuth(client, msg)) return;
+        const updated = await httpSessions.touchSession(msg.sessionId);
+        if (updated) {
+          send(client, { type: 'desktop_session_updated', session: updated, ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          broadcastDesktopSessionUpdated(updated);
+        } else {
+          sendError(client, 'unknown_session', `failed to touch session: ${msg.sessionId}`, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+        }
+        return;
+      }
       default: {
         const _exhaustive: never = msg;
         void _exhaustive;
@@ -825,4 +1007,3 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
 
   return { close };
 }
-

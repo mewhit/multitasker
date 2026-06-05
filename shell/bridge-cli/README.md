@@ -54,7 +54,7 @@ the desktop app.
    current terminal's `cols`/`rows`, `cwd`, and (if running inside VS Code) a
    `clientMetadata` block with VS Code env hints (`VSCODE_PID`,
    `VSCODE_IPC_HOOK_CLI`, `TERM_PROGRAM_VERSION`, workspace folder). The
-   gateway forwards this to the multitasker http-server so the desktop UI can
+   gateway forwards this to the multitasker backend so the desktop UI can
    offer an **Open in VS Code** action that focuses the originating window.
 4. Bridges stdio:
    - `stdin` (raw mode) → `input` messages

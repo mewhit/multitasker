@@ -1,4 +1,10 @@
 type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
+type Logger = {
+  info(msg: string, meta?: unknown): void;
+  warn(msg: string, meta?: unknown): void;
+  error(msg: string, meta?: unknown): void;
+  debug(msg: string, meta?: unknown): void;
+};
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 10,
@@ -28,8 +34,8 @@ function ts(): string {
   return new Date().toISOString();
 }
 
-function fmt(level: string, msg: string, meta?: unknown): string {
-  const base = `[${ts()}] [shell] [${level}] ${msg}`;
+function fmt(component: string, level: string, msg: string, meta?: unknown): string {
+  const base = `[${ts()}] [${component}] [${level}] ${msg}`;
   if (meta === undefined) return base;
   try {
     return `${base} ${JSON.stringify(meta)}`;
@@ -151,9 +157,9 @@ function extractSessionId(meta: unknown): string | null {
   return null;
 }
 
-function emit(level: LogLevel, msg: string, meta?: unknown): void {
+function emit(component: string, level: LogLevel, msg: string, meta?: unknown): void {
   if (!shouldLog(level)) return;
-  const line = fmt(level, msg, meta) + '\n';
+  const line = fmt(component, level, msg, meta) + '\n';
   process.stderr.write(line);
   const sink = getFileSink();
   if (sink) sink.write(line);
@@ -164,17 +170,22 @@ function emit(level: LogLevel, msg: string, meta?: unknown): void {
   }
 }
 
-export const log = {
-  info(msg: string, meta?: unknown): void {
-    emit('info', msg, meta);
-  },
-  warn(msg: string, meta?: unknown): void {
-    emit('warn', msg, meta);
-  },
-  error(msg: string, meta?: unknown): void {
-    emit('error', msg, meta);
-  },
-  debug(msg: string, meta?: unknown): void {
-    emit('debug', msg, meta);
-  },
-};
+export function createLogger(component: string): Logger {
+  const tag = component.trim() || 'shell';
+  return {
+    info(msg: string, meta?: unknown): void {
+      emit(tag, 'info', msg, meta);
+    },
+    warn(msg: string, meta?: unknown): void {
+      emit(tag, 'warn', msg, meta);
+    },
+    error(msg: string, meta?: unknown): void {
+      emit(tag, 'error', msg, meta);
+    },
+    debug(msg: string, meta?: unknown): void {
+      emit(tag, 'debug', msg, meta);
+    },
+  };
+}
+
+export const log = createLogger('shell');

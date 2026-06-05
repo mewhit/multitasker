@@ -22,13 +22,12 @@
 //   * 'idle'         - screen has been stable for IDLE_TIMEOUT_MS AND no
 //                      prompt is visible.
 //
-// User input (`onInput`) immediately forces 'working' if we were waiting,
-// same as before. `onCommandLine` still pins the agent kind from the
-// command line so external code that reads `change.agentKind` keeps
-// working.
+// User input/focus signals are treated as context (guards against false
+// "working" promotions on redraw/focus noise), not as proof that the agent
+// is actively computing.
 
 import { Terminal } from '@xterm/headless';
-import { log } from '../shell/core/logger';
+import { log } from './logger';
 
 export type AgentKind = 'codex' | 'copilot' | 'claude' | 'gemini' | 'generic';
 export type AgentStatus = 'working' | 'needs_input' | 'idle';
@@ -55,6 +54,16 @@ const STATUS_CHANGE_STABILIZATION_MS = 500;
 // status didn't transition. This keeps downstream state in sync when another
 // producer briefly overwrites the UI status to needs_attention.
 const WORKING_HEARTBEAT_MS = 1200;
+// After focus/typing activity, suppress auto-promotion to "working" for a
+// short window so harmless UI redraws don't look like agent execution.
+const FOCUS_GUARD_MS = 1500;
+const TYPING_GUARD_MS = 1200;
+const NO_OUTPUT_NEEDS_INPUT_MS = 30000;
+const INTERRUPT_OVERRIDE_RECENT_OUTPUT_MS = 4000;
+const FLAP_WINDOW_MS = 30000;
+const FLAP_MIN_TRANSITIONS = 5;
+const FLAP_HOLD_MS = 15000;
+const BOTTOM_SCAN_LINES = 12;
 
 // Regexes evaluated only on the bottom non-empty line(s) of the visible
 // screen. Anything below this list is intentionally simple â€” the headless
@@ -85,6 +94,8 @@ const PROMPT_PATTERNS: RegExp[] = [
 const RUNNING_OVERRIDE_PATTERNS: RegExp[] = [
   /\b(?:esc|escape)\s+to\s+(?:cancel|interrupt|stop)\b/i,
   /\b(?:ctrl[-+ ]?c|\^c)\s+to\s+(?:cancel|interrupt|stop)\b/i,
+  /\b(?:esc|escape)\s+(?:cancel|interrupt|stop)\b/i,
+  /\b(?:working|running)\b.*\b(?:esc|escape)\b.*\b(?:cancel|interrupt|stop)\b/i,
 ];
 
 const INTERACTIVE_AGENT_COMMAND_PATTERN =
@@ -111,6 +122,15 @@ interface SessionState {
   lastScreenChangeAt: number;
   /** Last time we emitted a working heartbeat while output was flowing. */
   lastWorkingHeartbeatAt: number;
+  lastOutputAt: number;
+  /** User typing signal from the UI layer. */
+  userTyping: boolean;
+  lastTypingSignalAt: number;
+  /** Terminal focus signal from the UI layer. */
+  terminalFocused: boolean;
+  lastFocusSignalAt: number;
+  workingIdleTransitions: Array<{ status: 'working' | 'idle'; at: number }>;
+  flappingUntil: number;
   /** Set when we received chunks since the last tick â€” tick will refresh
    *  lastScreenChangeAt if the screen actually moved. */
   hadChunkSinceTick: boolean;
@@ -142,10 +162,23 @@ export class OutputAnalyzer {
     if (!isMeaningfulUserInput(data)) return null;
     const state = this.getState(sessionId);
     state.lastUserInputAt = now;
-    if (state.lastStatus === 'needs_input' || state.lastStatus === 'idle') {
-      return this.transition(state, sessionId, 'working', 'user input received', now);
-    }
+    // Input is ambiguous in PTY-based interactive CLIs (user keystrokes can
+    // trigger lightweight redraws). Keep it as a context signal only.
+    state.lastTypingSignalAt = now;
     return null;
+  }
+
+  onUserTyping(sessionId: string, isTyping: boolean, now: number = Date.now()): void {
+    const state = this.getState(sessionId);
+    state.userTyping = !!isTyping;
+    state.lastTypingSignalAt = now;
+    if (isTyping) state.lastUserInputAt = now;
+  }
+
+  onTerminalFocus(sessionId: string, focused: boolean, now: number = Date.now()): void {
+    const state = this.getState(sessionId);
+    state.terminalFocused = !!focused;
+    state.lastFocusSignalAt = now;
   }
 
   /** Hint the analyzer about the command being run so it can pre-pin the agent kind. */
@@ -182,6 +215,7 @@ export class OutputAnalyzer {
   onOutput(sessionId: string, data: string, now: number = Date.now()): AgentStatusChange | null {
     if (!data || data.length === 0) return null;
     const state = this.getState(sessionId);
+    state.lastOutputAt = now;
     state.pendingChunks.push(data);
     state.pendingBytes += data.length;
     // Tail-cap: if a session dumps multi-MB between ticks, keep only the
@@ -194,6 +228,8 @@ export class OutputAnalyzer {
     }
     state.hadChunkSinceTick = true;
     if (state.lastStatus !== 'working') {
+      const suppressReason = this.getWorkingSuppressionReason(state, now);
+      if (suppressReason) return null;
       return this.transition(state, sessionId, 'working', 'output chunk received', now);
     }
     if (now - state.lastWorkingHeartbeatAt >= WORKING_HEARTBEAT_MS) {
@@ -263,6 +299,8 @@ export class OutputAnalyzer {
 
       if (screenChanged) {
         if (state.lastStatus !== 'working') {
+          const suppressReason = this.getWorkingSuppressionReason(state, now);
+          if (suppressReason) continue;
           const change = this.transition(state, sessionId, 'working', 'screen changed', now);
           if (change) out.push({ sessionId, change });
         }
@@ -273,12 +311,35 @@ export class OutputAnalyzer {
       if (stableFor < IDLE_TIMEOUT_MS) continue;
       if (inInputGrace) continue;
 
-      const bottomLines = bottomNonEmptyLines(state.term, 6);
+      const sinceOutput = state.lastOutputAt > 0 ? now - state.lastOutputAt : Infinity;
+      if (
+        state.lastStatus !== 'needs_input' &&
+        sinceOutput >= NO_OUTPUT_NEEDS_INPUT_MS
+      ) {
+        const change = this.transition(
+          state,
+          sessionId,
+          'needs_input',
+          `no shell output for ${sinceOutput}ms`,
+          now,
+        );
+        if (change) out.push({ sessionId, change });
+        continue;
+      }
+
+      const bottomLines = bottomNonEmptyLines(state.term, BOTTOM_SCAN_LINES);
       const bottomBlock = bottomLines.join('\n');
       const overrideMatch = bottomLines.length
         ? RUNNING_OVERRIDE_PATTERNS.find(p => p.test(bottomBlock))
         : undefined;
       if (overrideMatch) {
+        const sinceOutput = state.lastOutputAt > 0 ? now - state.lastOutputAt : Infinity;
+        if (sinceOutput > INTERRUPT_OVERRIDE_RECENT_OUTPUT_MS) {
+          // Static footer text like "esc to cancel" can stay visible even when
+          // the agent is not emitting output. Don't force working unless output
+          // was seen recently.
+          continue;
+        }
         // The screen happens to look stable but the agent is showing an
         // active "esc to interrupt" footer. Treat as working and refresh
         // the change timestamp so we don't keep re-evaluating.
@@ -343,24 +404,66 @@ export class OutputAnalyzer {
     now: number,
     matchedText?: string,
   ): AgentStatusChange | null {
-    if (state.lastStatus === status) return null;
-    state.lastStatus = status;
+    const previousStatus = state.lastStatus;
+    let nextStatus: AgentStatus = status;
+    let nextReason = reason;
+    if (this.isWorkingIdleFlapping(state, status, now)) {
+      nextStatus = 'needs_input';
+      nextReason = `working/idle loop detected; ${reason}`;
+      state.flappingUntil = Math.max(state.flappingUntil, now + FLAP_HOLD_MS);
+    }
+    if (state.lastStatus === nextStatus) return null;
+    state.lastStatus = nextStatus;
     state.lastStatusChangeAt = now;
-    if (status === 'working') state.lastWorkingHeartbeatAt = now;
+    if (nextStatus === 'working') state.lastWorkingHeartbeatAt = now;
+    if (nextStatus === 'working' || nextStatus === 'idle') {
+      state.workingIdleTransitions.push({ status: nextStatus, at: now });
+      state.workingIdleTransitions = state.workingIdleTransitions.filter((entry) => now - entry.at <= FLAP_WINDOW_MS);
+    } else if (nextStatus === 'needs_input') {
+      state.workingIdleTransitions = [];
+    }
     const change: AgentStatusChange = {
-      status,
+      status: nextStatus,
       agentKind: state.agentKind,
-      reason,
+      reason: nextReason,
     };
     if (matchedText) change.matchedText = matchedText;
-    log.debug('analyzer_status_change', {
+    log.info('agent_status_transition', {
       sessionId,
       agentKind: state.agentKind,
-      status,
-      reason,
+      fromStatus: previousStatus,
+      toStatus: nextStatus,
+      reason: nextReason,
       matchedText,
     });
     return change;
+  }
+
+  private isWorkingIdleFlapping(state: SessionState, proposed: AgentStatus, now: number): boolean {
+    if (proposed !== 'working' && proposed !== 'idle') return false;
+    if (state.lastStatus !== 'working' && state.lastStatus !== 'idle') return false;
+    if (state.lastStatus === proposed) return false;
+    const recent = state.workingIdleTransitions.filter((entry) => now - entry.at <= FLAP_WINDOW_MS);
+    const series: Array<'working' | 'idle'> = [...recent.map((entry) => entry.status), proposed];
+    if (series.length < FLAP_MIN_TRANSITIONS) return false;
+    let alternatingRun = 1;
+    for (let i = series.length - 2; i >= 0; i--) {
+      if (series[i] === series[i + 1]) break;
+      alternatingRun++;
+    }
+    return alternatingRun >= FLAP_MIN_TRANSITIONS;
+  }
+
+  private getWorkingSuppressionReason(state: SessionState, now: number): string | null {
+    if (state.flappingUntil > now) return 'working_idle_flapping_hold';
+    if (state.userTyping) return 'user_typing_active';
+    if (state.lastTypingSignalAt > 0 && now - state.lastTypingSignalAt < TYPING_GUARD_MS) {
+      return 'recent_user_typing';
+    }
+    if (state.terminalFocused && state.lastFocusSignalAt > 0 && now - state.lastFocusSignalAt < FOCUS_GUARD_MS) {
+      return 'recent_terminal_focus';
+    }
+    return null;
   }
 
   private getState(sessionId: string): SessionState {
@@ -384,6 +487,13 @@ export class OutputAnalyzer {
       lastSnapshot: '',
       lastScreenChangeAt: 0,
       lastWorkingHeartbeatAt: 0,
+      lastOutputAt: 0,
+      userTyping: false,
+      lastTypingSignalAt: 0,
+      terminalFocused: false,
+      lastFocusSignalAt: 0,
+      workingIdleTransitions: [],
+      flappingUntil: 0,
       hadChunkSinceTick: false,
       pendingChunks: [],
       pendingBytes: 0,
@@ -440,6 +550,7 @@ function detectAgentKindFromCommand(commandLine: string): AgentKind {
 export function debugLogAgentStatus(sessionId: string, change: AgentStatusChange): void {
   log.info('agent_status', {
     sessionId,
+    source: 'shell_push',
     status: change.status,
     agentKind: change.agentKind,
     reason: change.reason,

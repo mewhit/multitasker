@@ -49,6 +49,7 @@ export type ClientMessage =
   | { type: 'hello'; id?: string; token?: string }
   | { type: 'ping'; id?: string }
   | { type: 'list_sessions'; id?: string }
+  | { type: 'list_desktop_sessions'; id?: string }
   | {
       type: 'create_session';
       id?: string;
@@ -64,7 +65,7 @@ export type ClientMessage =
       track?: boolean;
       /**
        * Optional metadata about the client (e.g. VS Code) that opened this
-       * session. The gateway forwards it to the multitasker http-server so the
+       * session. The gateway forwards it to the multitasker backend so the
        * desktop UI can offer client-specific actions (e.g. "Open in VS Code").
        */
       clientMetadata?: ClientMetadata;
@@ -81,8 +82,13 @@ export type ClientMessage =
   | { type: 'attach'; id?: string; sessionId: string }
   | { type: 'detach'; id?: string; sessionId: string }
   | { type: 'input'; id?: string; sessionId: string; data: string }
+  | { type: 'user_typing'; id?: string; sessionId: string; isTyping: boolean; occurredAt?: number }
+  | { type: 'terminal_focus'; id?: string; sessionId: string; focused: boolean; occurredAt?: number }
   | { type: 'resize'; id?: string; sessionId: string; cols: number; rows: number }
-  | { type: 'kill'; id?: string; sessionId: string; signal?: string };
+  | { type: 'kill'; id?: string; sessionId: string; signal?: string }
+  | { type: 'rename_session'; id?: string; sessionId: string; name: string }
+  | { type: 'remove_session'; id?: string; sessionId: string }
+  | { type: 'touch_session'; id?: string; sessionId: string };
 
 export type ServerMessage =
   | {
@@ -111,6 +117,20 @@ export type ServerMessage =
   | { type: 'detached'; id?: string; sessionId: string }
   | { type: 'output'; sessionId: string; data: string; replay?: boolean }
   | {
+      type: 'user_typing';
+      sessionId: string;
+      isTyping: boolean;
+      occurredAt: number;
+      sourceClientId: string;
+    }
+  | {
+      type: 'terminal_focus';
+      sessionId: string;
+      focused: boolean;
+      occurredAt: number;
+      sourceClientId: string;
+    }
+  | {
       type: 'agent_status';
       sessionId: string;
       status: 'working' | 'needs_input' | 'idle';
@@ -120,6 +140,13 @@ export type ServerMessage =
       occurredAt: number;
     }
   | { type: 'exit'; sessionId: string; exitCode: number; signal: number | null }
+  | { type: 'session_created'; id?: string; session: SessionInfo }
+  | { type: 'session_updated'; id?: string; session: SessionInfo }
+  | { type: 'session_removed'; id?: string; sessionId: string }
+  | { type: 'desktop_sessions'; id?: string; sessions: unknown[] }
+  | { type: 'desktop_session_created'; id?: string; session: unknown }
+  | { type: 'desktop_session_updated'; id?: string; session: unknown }
+  | { type: 'desktop_session_removed'; id?: string; sessionId: string }
   | {
       type: 'error';
       id?: string;

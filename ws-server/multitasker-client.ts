@@ -1,6 +1,6 @@
 import * as http from 'http';
 import { URL } from 'url';
-import type { ClientMetadata } from './protocol';
+import type { ClientMetadata } from '../shell/core/protocol';
 import { log } from './logger';
 
 export interface CreateSessionRequest {
@@ -10,10 +10,6 @@ export interface CreateSessionRequest {
   shellType: 'powershell' | 'bash' | 'ssh';
   sshCommand?: string;
   shellSessionId?: string;
-  /** Request a specific session ID. When supplied, the http-server uses
-   * it instead of generating one, so the gateway-side shell session id
-   * and the multitasker session id are conflated and a client can
-   * `attach` via WS using the same id. */
   requestedId?: string;
 }
 

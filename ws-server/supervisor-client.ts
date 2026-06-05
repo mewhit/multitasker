@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import * as net from 'net';
 import { AUTH_TOKEN } from '../shell/core/constants';
-import { log } from '../shell/core/logger';
+import { log } from './logger';
 import type { SessionInfo, SshConnectOptions } from '../shell/core/protocol';
 import {
   IPC_MAX_LINE_BYTES,
@@ -408,4 +408,3 @@ export class SupervisorClient extends EventEmitter {
     });
   }
 }
-

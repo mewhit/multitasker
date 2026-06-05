@@ -26,21 +26,9 @@ Environment variables:
 | `SHELL_PORT` | `4321` | TCP port for the WebSocket server. |
 | `SHELL_AUTH_TOKEN` | _(empty)_ | If set, clients must send `{type:"hello",token:"..."}` before any other message. |
 | `SHELL_DEBUG` | _(unset)_ | When set, emits debug logs on stderr. |
-| `MULTITASKER_BACKEND_URL` | `http://127.0.0.1:39017` | Base URL of the multitasker http-server. |
-| `MULTITASKER_INTEGRATION` | `1` | Set to `0` to disable auto-registering shells as multitasker tasks. |
-| `MULTITASKER_SHELL_NAME_PREFIX` | `shell` | Prefix for the task name in multitasker (e.g. `shell 5d142691`). |
 
-## Multitasker integration
-
-When enabled, every PTY session created by this server is automatically
-registered with the multitasker http-server as a new task:
-
-- On `session_created` → `POST /api/session/create` with `{ name, cmd: '', cwd, shellType }`.
-- On PTY exit / session removal → `POST /api/session/remove` with the
-  multitasker session id returned earlier.
-
-Failures (backend down, non-2xx response) are logged on stderr but never
-crash the shell server.
+Session/task persistence is handled by the WebSocket gateway layer, not by the
+supervisor process.
 
 ## Protocol (v1)
 
@@ -58,6 +46,8 @@ client correlate responses.
 | `attach` | `{ sessionId }` | Subscribe to a session's output stream. |
 | `detach` | `{ sessionId }` | Stop receiving output for a session. |
 | `input` | `{ sessionId, data }` | Write raw bytes to the PTY (e.g. `"ls\r"`). |
+| `user_typing` | `{ sessionId, isTyping, occurredAt? }` | Optional UI signal: client started/stopped typing. |
+| `terminal_focus` | `{ sessionId, focused, occurredAt? }` | Optional UI signal: terminal focus changed. |
 | `resize` | `{ sessionId, cols, rows }` | Resize the PTY. |
 | `kill` | `{ sessionId, signal? }` | Kill the underlying process. |
 
@@ -72,6 +62,8 @@ client correlate responses.
 | `session_created` | `{ sessionId, pid, shell, cwd, cols, rows }` |
 | `attached` / `detached` | `{ sessionId }` |
 | `output` | `{ sessionId, data }` (only sent to attached subscribers) |
+| `user_typing` | `{ sessionId, isTyping, occurredAt, sourceClientId }` (broadcast to session subscribers) |
+| `terminal_focus` | `{ sessionId, focused, occurredAt, sourceClientId }` (broadcast to session subscribers) |
 | `exit` | `{ sessionId, exitCode, signal }` |
 | `error` | `{ code, message, sessionId?, id? }` |
 

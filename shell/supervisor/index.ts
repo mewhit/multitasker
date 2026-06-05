@@ -1,11 +1,5 @@
 import * as fs from 'fs';
-import {
-  MULTITASKER_BACKEND_URL,
-  MULTITASKER_INTEGRATION_ENABLED,
-  MULTITASKER_SHELL_NAME_PREFIX,
-} from '../core/constants';
 import { log } from '../core/logger';
-import { MultitaskerBridge } from '../core/multitasker-bridge';
 import { SessionManager } from '../core/session-manager';
 import { ipcPipePath } from '../ipc/pipe';
 import { startIpcServer, type IpcServer } from './ipc-server';
@@ -35,17 +29,6 @@ async function main(): Promise<void> {
 
   const sessions = new SessionManager();
 
-  let bridge: MultitaskerBridge | undefined;
-  if (MULTITASKER_INTEGRATION_ENABLED) {
-    bridge = new MultitaskerBridge(sessions, {
-      backendUrl: MULTITASKER_BACKEND_URL,
-      namePrefix: MULTITASKER_SHELL_NAME_PREFIX,
-    });
-    bridge.start();
-  } else {
-    log.info('multitasker integration disabled (MULTITASKER_INTEGRATION=0)');
-  }
-
   let ipc: IpcServer;
   try {
     ipc = await startIpcServer(pipePath, sessions);
@@ -59,7 +42,6 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info('supervisor shutting down', { reason });
-    bridge?.stop();
     ipc
       .close()
       .catch((e: unknown) => log.error('ipc close error', { error: (e as Error).message }))

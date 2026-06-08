@@ -3,7 +3,7 @@ import {
   loadManualTasks,
   loadRecurringTasks,
   loadSlackNotifications,
-} from '../../../desktop/settings';
+} from '../../../shared/settings';
 import { sessionManager, taskIdByTerminalRef, multitaskerSessionIdByShellSessionId } from '../../state/sessions';
 import { manualTasks, recurringTasks, slackNotifications } from '../../state/tasks';
 import { MAX_MANUAL_TASKS, MAX_RECURRING_TASKS, MAX_SLACK_NOTIFICATIONS } from '../../core/constants';
@@ -11,7 +11,7 @@ import { isShellType } from '../../utils/types';
 import { flushPendingTerminalUpdates, flushPendingTerminalEvents } from '../terminals/apply';
 
 export function restorePersistedState(): void {
-  const settings = require('../../../desktop/settings').loadSettings();
+  const settings = require('../../../shared/settings').loadSettings();
   for (const sessionState of loadSessions()) {
     const shellType = isShellType(String(sessionState.shellType)) ? sessionState.shellType : settings.defaultShell;
     sessionManager.createSession(

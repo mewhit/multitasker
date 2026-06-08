@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { SessionState } from '../../../desktop/settings';
+import type { SessionState } from '../../../shared/settings';
 import type { MultitaskerCreateSessionRequest } from '../../types';
 import { sessionManager, taskIdByTerminalRef, pendingLaunchTaskIdByLaunchId } from '../../state/sessions';
 import { readStringField, readOptionalNumberField } from '../../utils/payload';

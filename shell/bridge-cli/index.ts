@@ -36,9 +36,9 @@ const DEBUG_STDIN_PATH: string | null = (() => {
   const flag = process.env["MULTITASKER_DEBUG_STDIN"]?.trim();
   if (!flag || flag === "0" || flag.toLowerCase() === "false") return null;
   try {
-    const dir = resolvePath(process.cwd(), ".tmp");
+    const dir = resolvePath(process.cwd(), ".tmp", "bridge-cli");
     mkdirSync(dir, { recursive: true });
-    return resolvePath(dir, `bridge-stdin-${process.pid}.log`);
+    return resolvePath(dir, `stdin-${process.pid}.log`);
   } catch {
     return null;
   }

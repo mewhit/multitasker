@@ -312,8 +312,13 @@ export class OutputAnalyzer {
       if (inInputGrace) continue;
 
       const sinceOutput = state.lastOutputAt > 0 ? now - state.lastOutputAt : Infinity;
+      // Fallback for "stuck in working": if we saw no shell output for a long
+      // time while still marked as working, force needs_input once.
+      //
+      // Do NOT apply this when already idle/needs_input, otherwise we'd bounce
+      // between idle and needs_input on every tick with no new output.
       if (
-        state.lastStatus !== 'needs_input' &&
+        state.lastStatus === 'working' &&
         sinceOutput >= NO_OUTPUT_NEEDS_INPUT_MS
       ) {
         const change = this.transition(
@@ -429,6 +434,7 @@ export class OutputAnalyzer {
     };
     if (matchedText) change.matchedText = matchedText;
     log.info('agent_status_transition', {
+      sourceApp: 'ws-server/analyzer',
       sessionId,
       agentKind: state.agentKind,
       fromStatus: previousStatus,
@@ -549,6 +555,7 @@ function detectAgentKindFromCommand(commandLine: string): AgentKind {
 
 export function debugLogAgentStatus(sessionId: string, change: AgentStatusChange): void {
   log.info('agent_status', {
+    sourceApp: 'ws-server/analyzer',
     sessionId,
     source: 'shell_push',
     status: change.status,

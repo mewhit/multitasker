@@ -1,6 +1,6 @@
 import * as http from 'http';
 import { URL } from 'url';
-import type { ClientMetadata } from '../shell/core/protocol';
+import type { ClientMetadata } from '../shared/shell-protocol';
 import { log } from './logger';
 
 export interface CreateSessionRequest {
@@ -39,7 +39,7 @@ export class MultitaskerClient {
   async createSession(req: CreateSessionRequest): Promise<MultitaskerSession | null> {
     const res = await this.post<CreateSessionResponse>('/api/session/create', req);
     if (!res.ok || !res.session) {
-      log.warn('multitasker create_session failed', { error: res.error });
+      log.warn('multitasker create_session failed', { sourceApp: 'http-server', error: res.error });
       return null;
     }
     return res.session;
@@ -48,7 +48,7 @@ export class MultitaskerClient {
   async removeSession(id: string): Promise<boolean> {
     const res = await this.post<{ ok: boolean; error?: string }>('/api/session/remove', { id });
     if (!res.ok) {
-      log.warn('multitasker remove_session failed', { id, error: res.error });
+      log.warn('multitasker remove_session failed', { sourceApp: 'http-server', id, error: res.error });
       return false;
     }
     return true;
@@ -66,6 +66,7 @@ export class MultitaskerClient {
       await this.post<{ ok: boolean }>('/api/shell/agent-status', req);
     } catch (e) {
       log.warn('multitasker agent-status failed', {
+        sourceApp: 'http-server',
         shellSessionId: req.shellSessionId,
         error: (e as Error).message,
       });
@@ -80,6 +81,7 @@ export class MultitaskerClient {
       await this.post<{ ok: boolean }>('/api/shell/client-metadata', req);
     } catch (e) {
       log.warn('multitasker client-metadata failed', {
+        sourceApp: 'http-server',
         shellSessionId: req.shellSessionId,
         error: (e as Error).message,
       });

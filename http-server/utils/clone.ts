@@ -1,4 +1,4 @@
-import type { ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../desktop/settings';
+import type { ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../shared/settings';
 
 export function cloneManualTask(task: ManualTaskState): ManualTaskState {
   return { ...task };

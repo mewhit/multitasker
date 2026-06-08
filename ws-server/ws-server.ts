@@ -10,7 +10,7 @@ import {
   PORT,
   PROTOCOL_VERSION,
   defaultShell,
-} from '../shell/core/constants';
+} from '../shared/shell-constants';
 import { log } from './logger';
 import {
   MULTITASKER_BACKEND_URL,
@@ -23,7 +23,7 @@ import {
   type ClientMessage,
   type ErrorCode,
   type ServerMessage,
-} from '../shell/core/protocol';
+} from '../shared/shell-protocol';
 import { SupervisorClient } from './supervisor-client';
 import { OutputAnalyzer, debugLogAgentStatus, type AgentStatusChange } from './output-analyzer';
 import {
@@ -36,6 +36,7 @@ interface Client {
   ws: WebSocket;
   authenticated: boolean;
   remote: string;
+  sourceApp: string;
   lastBufferWarnAt: number;
 }
 
@@ -43,6 +44,7 @@ const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const WS_BUFFER_WARN_BYTES = 256 * 1024;
 const WS_BUFFER_WARN_INTERVAL_MS = 1000;
 const WS_BUFFER_DROP_BYTES = 8 * 1024 * 1024;
+const WS_BUFFER_DROP_BYTES_DESKTOP = 64 * 1024 * 1024;
 
 // Per-session, per-client desired terminal size. When multiple clients
 // attach to the same PTY (e.g. xterm in multitasker + bridge-cli hosted
@@ -66,20 +68,26 @@ function safeWsSend(client: Client, payload: string): void {
   if (client.ws.readyState !== WebSocket.OPEN) return;
   client.ws.send(payload);
   const buffered = client.ws.bufferedAmount;
+  const dropThreshold = client.sourceApp === 'desktop'
+    ? WS_BUFFER_DROP_BYTES_DESKTOP
+    : WS_BUFFER_DROP_BYTES;
   if (buffered > WS_BUFFER_WARN_BYTES) {
     const now = Date.now();
     if (now - client.lastBufferWarnAt > WS_BUFFER_WARN_INTERVAL_MS) {
       client.lastBufferWarnAt = now;
       log.warn('ws buffer growing', {
         clientId: client.id,
+        sourceApp: client.sourceApp,
         bufferedAmount: buffered,
       });
     }
   }
-  if (buffered > WS_BUFFER_DROP_BYTES) {
+  if (buffered > dropThreshold) {
     log.warn('ws buffer exceeded, terminating client', {
       clientId: client.id,
+      sourceApp: client.sourceApp,
       bufferedAmount: buffered,
+      dropThreshold,
     });
     try {
       client.ws.terminate();
@@ -99,6 +107,10 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   const sessionSubscribers = new Map<string, Set<string>>();
   /** clientId -> set of session ids that client is subscribed to. */
   const clientSubscriptions = new Map<string, Set<string>>();
+  /** sessionId -> set of client ids watching status for this session. */
+  const statusWatchers = new Map<string, Set<string>>();
+  /** clientId -> set of session ids this client watches for status. */
+  const clientStatusWatches = new Map<string, Set<string>>();
   const analyzer = new OutputAnalyzer();
   const httpSessions = new HttpSessionsClient();
   const multitasker = MULTITASKER_INTEGRATION_ENABLED
@@ -155,6 +167,22 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     return s;
   }
 
+  function statusWatchersOf(sessionId: string): Set<string> {
+    let s = statusWatchers.get(sessionId);
+    if (!s) {
+      s = new Set();
+      statusWatchers.set(sessionId, s);
+    }
+    return s;
+  }
+
+  function shouldKeepSupervisorSubscription(sessionId: string): boolean {
+    const subs = sessionSubscribers.get(sessionId);
+    if (subs && subs.size > 0) return true;
+    const watchers = statusWatchers.get(sessionId);
+    return !!(watchers && watchers.size > 0);
+  }
+
   function addSubscription(clientId: string, sessionId: string): void {
     subscribersOf(sessionId).add(clientId);
     let s = clientSubscriptions.get(clientId);
@@ -171,7 +199,9 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
       subs.delete(clientId);
       if (subs.size === 0) {
         sessionSubscribers.delete(sessionId);
-        supervisor.unsubscribe(sessionId);
+        if (!shouldKeepSupervisorSubscription(sessionId)) {
+          supervisor.unsubscribe(sessionId);
+        }
       }
     }
     clientSubscriptions.get(clientId)?.delete(sessionId);
@@ -187,12 +217,69 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         subs.delete(clientId);
         if (subs.size === 0) {
           sessionSubscribers.delete(sessionId);
-          supervisor.unsubscribe(sessionId);
+          if (!shouldKeepSupervisorSubscription(sessionId)) {
+            supervisor.unsubscribe(sessionId);
+          }
         }
       }
       forgetClientSize(clientId, sessionId);
     }
     clientSubscriptions.delete(clientId);
+  }
+
+  function addStatusWatch(clientId: string, sessionId: string): void {
+    statusWatchersOf(sessionId).add(clientId);
+    let set = clientStatusWatches.get(clientId);
+    if (!set) {
+      set = new Set();
+      clientStatusWatches.set(clientId, set);
+    }
+    set.add(sessionId);
+  }
+
+  function removeStatusWatch(clientId: string, sessionId: string): void {
+    const watchers = statusWatchers.get(sessionId);
+    if (watchers) {
+      watchers.delete(clientId);
+      if (watchers.size === 0) {
+        statusWatchers.delete(sessionId);
+        if (!shouldKeepSupervisorSubscription(sessionId)) {
+          supervisor.unsubscribe(sessionId);
+        }
+      }
+    }
+    clientStatusWatches.get(clientId)?.delete(sessionId);
+  }
+
+  function removeAllStatusWatches(clientId: string): void {
+    const set = clientStatusWatches.get(clientId);
+    if (!set) return;
+    for (const sessionId of set) {
+      const watchers = statusWatchers.get(sessionId);
+      if (watchers) {
+        watchers.delete(clientId);
+        if (watchers.size === 0) {
+          statusWatchers.delete(sessionId);
+          if (!shouldKeepSupervisorSubscription(sessionId)) {
+            supervisor.unsubscribe(sessionId);
+          }
+        }
+      }
+    }
+    clientStatusWatches.delete(clientId);
+  }
+
+  function statusRecipientIds(sessionId: string): Set<string> {
+    const out = new Set<string>();
+    const subs = sessionSubscribers.get(sessionId);
+    if (subs) {
+      for (const cid of subs) out.add(cid);
+    }
+    const watchers = statusWatchers.get(sessionId);
+    if (watchers) {
+      for (const cid of watchers) out.add(cid);
+    }
+    return out;
   }
 
   function forgetClientSize(clientId: string, sessionId: string): void {
@@ -261,6 +348,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     s.chunks += 1;
     if (now - s.firstAt >= 1000) {
       log.debug('ws output rate', {
+        sourceApp: 'shell-supervisor',
         sessionId,
         bytes: s.bytes,
         chunks: s.chunks,
@@ -290,12 +378,10 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
       ...(change.matchedText ? { matchedText: change.matchedText } : {}),
     };
     const serialized = JSON.stringify(statusMsg);
-    const subs = sessionSubscribers.get(sessionId);
-    if (subs) {
-      for (const cid of subs) {
-        const c = clients.get(cid);
-        if (c) safeWsSend(c, serialized);
-      }
+    const recipients = statusRecipientIds(sessionId);
+    for (const cid of recipients) {
+      const c = clients.get(cid);
+      if (c) safeWsSend(c, serialized);
     }
     if (multitasker) {
       void multitasker.sendAgentStatus({
@@ -311,6 +397,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
 
   // Broadcast desktop session_updated event to all connected clients
   function broadcastDesktopSessionUpdated(session: DesktopSessionInfo): void {
+    log.info('desktop session updated', { sourceApp: 'http-server', sessionId: session.id, status: session.status });
     const msg: ServerMessage = {
       type: 'desktop_session_updated',
       session,
@@ -323,6 +410,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
 
   // Broadcast desktop session_removed event to all connected clients
   function broadcastDesktopSessionRemoved(sessionId: string): void {
+    log.info('desktop session removed', { sourceApp: 'http-server', sessionId });
     const msg: ServerMessage = {
       type: 'desktop_session_removed',
       sessionId,
@@ -410,46 +498,8 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     }
     trackWsOutput(sessionId, data.length, subCount);
     const change = ANALYZER_DISABLED ? null : analyzer.onOutput(sessionId, data);
-    if (change && subs && subs.size > 0) {
-      debugLogAgentStatus(sessionId, change);
-      const occurredAt = Date.now();
-      const statusMsg: ServerMessage = {
-        type: 'agent_status',
-        sessionId,
-        status: change.status,
-        agentKind: change.agentKind,
-        occurredAt,
-        ...(change.reason ? { reason: change.reason } : {}),
-        ...(change.matchedText ? { matchedText: change.matchedText } : {}),
-      };
-      const statusSerialized = JSON.stringify(statusMsg);
-      for (const cid of subs) {
-        const c = clients.get(cid);
-        if (c) safeWsSend(c, statusSerialized);
-      }
-      if (multitasker) {
-        void multitasker.sendAgentStatus({
-          shellSessionId: sessionId,
-          status: change.status,
-          agentKind: change.agentKind,
-          occurredAt,
-          ...(change.reason ? { reason: change.reason } : {}),
-          ...(change.matchedText ? { matchedText: change.matchedText } : {}),
-        });
-      }
-    } else if (change) {
-      debugLogAgentStatus(sessionId, change);
-      if (multitasker) {
-        const occurredAt = Date.now();
-        void multitasker.sendAgentStatus({
-          shellSessionId: sessionId,
-          status: change.status,
-          agentKind: change.agentKind,
-          occurredAt,
-          ...(change.reason ? { reason: change.reason } : {}),
-          ...(change.matchedText ? { matchedText: change.matchedText } : {}),
-        });
-      }
+    if (change) {
+      broadcastStatusChange(sessionId, change);
     }
   }
 
@@ -474,6 +524,12 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   });
 
   supervisor.on('exit', (sessionId, info) => {
+    log.info('supervisor session exit', {
+      sourceApp: 'shell-supervisor',
+      sessionId,
+      exitCode: info.exitCode,
+      signal: info.signal,
+    });
     // Flush any pending coalesced output so the 'exit' frame doesn't race
     // ahead of the final bytes the PTY produced before exiting.
     flushOutput(sessionId);
@@ -494,19 +550,22 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   });
 
   supervisor.on('removed', (sessionId) => {
+    log.info('supervisor session removed', { sourceApp: 'shell-supervisor', sessionId });
     pendingOutput.delete(sessionId);
     analyzer.reset(sessionId);
     sessionSubscribers.delete(sessionId);
+    statusWatchers.delete(sessionId);
     clientDesiredSizes.delete(sessionId);
     effectiveSizes.delete(sessionId);
     for (const set of clientSubscriptions.values()) set.delete(sessionId);
+    for (const set of clientStatusWatches.values()) set.delete(sessionId);
     if (multitasker) {
       void multitasker.removeSession(sessionId);
     }
   });
 
   supervisor.on('disconnected', () => {
-    log.warn('supervisor disconnected; closing all ws clients');
+    log.warn('supervisor disconnected; closing all ws clients', { sourceApp: 'shell-supervisor' });
     for (const c of clients.values()) {
       try {
         c.ws.close(1011, 'supervisor disconnected');
@@ -516,6 +575,8 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     }
     sessionSubscribers.clear();
     clientSubscriptions.clear();
+    statusWatchers.clear();
+    clientStatusWatches.clear();
     clientDesiredSizes.clear();
     effectiveSizes.clear();
   });
@@ -527,10 +588,11 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
       ws,
       authenticated: !AUTH_TOKEN,
       remote: req.socket.remoteAddress ?? 'unknown',
+      sourceApp: detectClientSourceApp(req),
       lastBufferWarnAt: 0,
     };
     clients.set(clientId, client);
-    log.info('client connected', { clientId, remote: client.remote });
+    log.info('client connected', { sourceApp: client.sourceApp, clientId, remote: client.remote });
 
     const ready: ServerMessage = {
       type: 'ready',
@@ -550,19 +612,20 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         return;
       }
       handleMessage(client, parsed).catch((e: unknown) => {
-        log.error('handler threw', { clientId, error: (e as Error).message });
+        log.error('handler threw', { sourceApp: client.sourceApp, clientId, error: (e as Error).message });
         sendError(client, 'internal_error', (e as Error).message);
       });
     });
 
     ws.on('close', () => {
-      log.info('client disconnected', { clientId });
+      log.info('client disconnected', { sourceApp: client.sourceApp, clientId });
       removeAllSubscriptions(clientId);
+      removeAllStatusWatches(clientId);
       clients.delete(clientId);
     });
 
     ws.on('error', (err) => {
-      log.warn('client socket error', { clientId, error: err.message });
+      log.warn('client socket error', { sourceApp: client.sourceApp, clientId, error: err.message });
     });
   });
 
@@ -601,6 +664,20 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
       return Date.now();
     }
     return value;
+  }
+
+  function detectClientSourceApp(req: IncomingMessage): string {
+    const userAgent = String(req.headers['user-agent'] ?? '').toLowerCase();
+    if (userAgent.includes('electron')) return 'desktop';
+    if (userAgent.includes('node')) return 'node-ws-client';
+    return 'ws-client';
+  }
+
+  function sourceAppForClientMessage(client: Client, msg: ClientMessage): string {
+    if (msg.type === 'create_session' && msg.clientMetadata?.kind === 'vscode') {
+      return 'bridge-cli/vscode';
+    }
+    return client.sourceApp;
   }
 
   function broadcastSessionEvent(sessionId: string, msg: ServerMessage): void {
@@ -642,12 +719,12 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         ...(info.kind !== undefined ? { kind: info.kind } : {}),
         ...(requestId !== undefined ? { id: requestId } : {}),
       });
-      log.info('ws attached', { clientId: client.id, sessionId, pid: info.pid, scrollbackBytes: scrollback.length });
+      log.info('ws attached', { sourceApp: client.sourceApp, clientId: client.id, sessionId, pid: info.pid, scrollbackBytes: scrollback.length });
       if (scrollback.length > 0) {
         send(client, { type: 'output', sessionId, data: scrollback, replay: true });
       }
     } catch (e) {
-      log.warn('ws attach failed', { clientId: client.id, sessionId, error: (e as Error).message });
+      log.warn('ws attach failed', { sourceApp: client.sourceApp, clientId: client.id, sessionId, error: (e as Error).message });
       sendError(client, 'unknown_session', (e as Error).message, {
         sessionId,
         ...(requestId !== undefined ? { id: requestId } : {}),
@@ -799,6 +876,33 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         await attachClientToSession(client, msg.sessionId, msg.id);
         return;
       }
+      case 'watch_status': {
+        if (!requireAuth(client, msg)) return;
+        const session = supervisor.getSession(msg.sessionId);
+        if (!session) {
+          sendError(client, 'unknown_session', `no such session: ${msg.sessionId}`, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+          return;
+        }
+        addStatusWatch(client.id, msg.sessionId);
+        try {
+          await supervisor.ensureSubscribed(msg.sessionId);
+        } catch (e) {
+          removeStatusWatch(client.id, msg.sessionId);
+          sendError(client, 'unknown_session', (e as Error).message, {
+            sessionId: msg.sessionId,
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+        }
+        return;
+      }
+      case 'unwatch_status': {
+        if (!requireAuth(client, msg)) return;
+        removeStatusWatch(client.id, msg.sessionId);
+        return;
+      }
       case 'detach': {
         if (!requireAuth(client, msg)) return;
         removeSubscription(client.id, msg.sessionId);
@@ -821,6 +925,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         const occurredAt = normalizeOccurredAt(msg.occurredAt);
         analyzer.onUserTyping(msg.sessionId, !!msg.isTyping, occurredAt);
         log.info('user_typing', {
+          sourceApp: sourceAppForClientMessage(client, msg),
           clientId: client.id,
           sessionId: msg.sessionId,
           isTyping: !!msg.isTyping,
@@ -847,6 +952,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         const occurredAt = normalizeOccurredAt(msg.occurredAt);
         analyzer.onTerminalFocus(msg.sessionId, !!msg.focused, occurredAt);
         log.info('terminal_focus', {
+          sourceApp: sourceAppForClientMessage(client, msg),
           clientId: client.id,
           sessionId: msg.sessionId,
           focused: !!msg.focused,
@@ -887,31 +993,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         // transition when the user clearly answered a prompt).
         const userInputChange = analyzer.onInput(msg.sessionId, msg.data);
         if (userInputChange) {
-          debugLogAgentStatus(msg.sessionId, userInputChange);
-          const occurredAt = Date.now();
-          const statusMsg: ServerMessage = {
-            type: 'agent_status',
-            sessionId: msg.sessionId,
-            status: userInputChange.status,
-            agentKind: userInputChange.agentKind,
-            occurredAt,
-            ...(userInputChange.reason ? { reason: userInputChange.reason } : {}),
-          };
-          const statusSerialized = JSON.stringify(statusMsg);
-          const subs = sessionSubscribers.get(msg.sessionId) ?? new Set<string>();
-          for (const cid of subs) {
-            const c = clients.get(cid);
-            if (c) safeWsSend(c, statusSerialized);
-          }
-          if (multitasker) {
-            void multitasker.sendAgentStatus({
-              shellSessionId: msg.sessionId,
-              status: userInputChange.status,
-              agentKind: userInputChange.agentKind,
-              occurredAt,
-              ...(userInputChange.reason ? { reason: userInputChange.reason } : {}),
-            });
-          }
+          broadcastStatusChange(msg.sessionId, userInputChange);
         }
         supervisor.input(msg.sessionId, msg.data);
         return;

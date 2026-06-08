@@ -1,5 +1,5 @@
-import type { RecurringTaskState } from '../../../desktop/settings';
-import { saveRecurringTasks } from '../../../desktop/settings';
+import type { RecurringTaskState } from '../../../shared/settings';
+import { saveRecurringTasks } from '../../../shared/settings';
 import { recurringTasks, getRecurringTaskTimer, setRecurringTaskTimer } from '../../state/tasks';
 import { RECURRING_TASK_CHECK_INTERVAL_MS } from '../../core/constants';
 import { getLocalMinutesSinceMidnight, getLocalDateKey, parseLocalDateKey, getLocalDateDiffDays, getDaysInMonth } from '../../utils/date';

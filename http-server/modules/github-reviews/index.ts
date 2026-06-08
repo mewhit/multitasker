@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { HttpModule, RouteDef } from '../../core/types';
 import type { GitHubPullRequest } from '../../types';
-import { loadSettings } from '../../../desktop/settings';
+import { loadSettings } from '../../../shared/settings';
 import {
   seenGitHubReviewRequestKeys,
   getGitHubReviewTimer,

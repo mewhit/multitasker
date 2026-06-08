@@ -1,0 +1,20 @@
+{
+  "name": "@multitasker/ws-server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "concurrently -k -n tsc:ws,ws-server -c magenta,blue \"tsc -w -p tsconfig.json\" \"node ..\\scripts\\dev-shell.js\"",
+    "start": "node ..\\dist\\ws-server\\server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@xterm/headless": "^6.0.0",
+    "ws": "^8.21.0"
+  }
+}

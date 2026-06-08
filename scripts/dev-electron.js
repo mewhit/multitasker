@@ -2,9 +2,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const electronPath = require('electron');
-
 const projectRoot = path.resolve(__dirname, '..');
+const electronPath = require(require.resolve('electron', {
+  paths: [path.join(projectRoot, 'desktop')],
+}));
 const distDir = path.join(projectRoot, 'dist');
 const mainFile = path.join(distDir, 'desktop', 'main.js');
 const rendererFile = path.join(projectRoot, 'desktop', 'index.html');

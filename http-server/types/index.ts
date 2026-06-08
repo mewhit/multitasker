@@ -1,5 +1,5 @@
-import type { Session, TerminalBinding } from '../../desktop/sessionManager';
-import type { ShellType, SlackNotificationState, ManualTaskState, RecurringTaskState } from '../../desktop/settings';
+import type { Session, TerminalBinding } from '../../shared/sessionManager';
+import type { ShellType, SlackNotificationState, ManualTaskState, RecurringTaskState } from '../../shared/settings';
 
 export type SlackNotificationPriorityLabel = NonNullable<SlackNotificationState['priorityLabel']>;
 

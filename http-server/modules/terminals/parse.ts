@@ -1,5 +1,5 @@
-import type { TerminalUpdate } from '../../../desktop/sessionManager';
-import type { TerminalEvent } from '../../../desktop/terminalEvents';
+import type { TerminalUpdate } from '../../../shared/sessionManager';
+import type { TerminalEvent } from '../../../shared/terminalEvents';
 import type { TerminalEventIdentity } from '../../types';
 import { sessionManager, taskIdByTerminalRef, pendingLaunchTaskIdByLaunchId } from '../../state/sessions';
 import { readStringField, readOptionalNumberField, readOptionalBooleanField } from '../../utils/payload';
@@ -103,7 +103,7 @@ export function resolveTerminalEventTaskId(identity: TerminalEventIdentity): str
   return findSessionForTerminalIdentity(identity)?.id ?? '';
 }
 
-export function findSessionForTerminalIdentity(identity: TerminalEventIdentity): import('../../../desktop/sessionManager').Session | null {
+export function findSessionForTerminalIdentity(identity: TerminalEventIdentity): import('../../../shared/sessionManager').Session | null {
   const sessions = sessionManager.getSessions();
   const exactRef = identity.terminalRef
     ? sessions.find(session => session.terminalRef === identity.terminalRef)

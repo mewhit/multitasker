@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import type { TerminalUpdate, SessionStatus } from '../../../desktop/sessionManager';
-import type { TerminalEvent, TerminalCaptureState } from '../../../desktop/terminalEvents';
+import type { TerminalUpdate, SessionStatus } from '../../../shared/sessionManager';
+import type { TerminalEvent, TerminalCaptureState } from '../../../shared/terminalEvents';
 import type { TerminalBinding } from '../../types';
 import { sessionManager, pendingTerminalUpdates, pendingTerminalEvents, removedSessionIds, taskIdByTerminalRef } from '../../state/sessions';
 import { terminalDebugLogFileBySessionId, reportedDebugLogWriteFailures } from '../../state/debug';
-import { saveSessions } from '../../../desktop/settings';
+import { saveSessions } from '../../../shared/settings';
 import { MAX_PENDING_TERMINAL_EVENTS_PER_SESSION, DEBUG_LOG_DIRECTORY, DEBUG_LOG_FILE_EXTENSION, isTerminalUpdateDebugEnabled } from '../../core/constants';
 import { getErrorMessage, formatDebugValue } from '../../core/util';
 import { getSessionsStateToSave } from '../sessions/parse';

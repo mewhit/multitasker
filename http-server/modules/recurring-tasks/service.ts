@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { RecurringTaskState } from '../../../desktop/settings';
-import { saveRecurringTasks } from '../../../desktop/settings';
+import type { RecurringTaskState } from '../../../shared/settings';
+import { saveRecurringTasks } from '../../../shared/settings';
 import { recurringTasks } from '../../state/tasks';
 import { MAX_RECURRING_TASKS } from '../../core/constants';
 import { truncateTaskText } from '../../utils/date';

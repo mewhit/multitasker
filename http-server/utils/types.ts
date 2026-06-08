@@ -1,6 +1,6 @@
-import type { SessionStatus } from '../../desktop/sessionManager';
-import type { ShellType, LocalShellType } from '../../desktop/settings';
-import type { TerminalCaptureState, TerminalEventType } from '../../desktop/terminalEvents';
+import type { SessionStatus } from '../../shared/sessionManager';
+import type { ShellType, LocalShellType } from '../../shared/settings';
+import type { TerminalCaptureState, TerminalEventType } from '../../shared/terminalEvents';
 
 export function isLocalShellType(value: unknown): value is LocalShellType {
   return value === 'powershell' || value === 'bash';

@@ -26,9 +26,8 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": false,
-    "types": ["node", "electron"]
+    "types": ["node"]
   },
-  "include": ["desktop/**/*.ts", "http-server/**/*.ts", "shell/**/*.ts", "ws-server/**/*.ts"],
+  "include": ["desktop/**/*.ts", "http-server/**/*.ts", "shell/**/*.ts", "ws-server/**/*.ts", "shared/**/*.ts"],
   "exclude": ["node_modules"]
 }
-

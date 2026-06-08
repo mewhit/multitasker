@@ -1,5 +1,5 @@
 import { log } from './logger';
-import { ipcPipePath } from '../shell/ipc/pipe';
+import { ipcPipePath } from '../shared/shell-ipc-pipe';
 import { SupervisorClient } from './supervisor-client';
 import { startWsServer } from './ws-server';
 

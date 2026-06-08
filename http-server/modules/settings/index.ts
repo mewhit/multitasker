@@ -1,6 +1,6 @@
 import type { HttpModule, RouteDef } from '../../core/types';
 import { writeJsonResponse } from '../../core/body';
-import { loadSettings, saveSettings, type AppSettings } from '../../../desktop/settings';
+import { loadSettings, saveSettings, type AppSettings } from '../../../shared/settings';
 import { isLocalShellType } from '../../utils/types';
 import { startGitHubReviewScheduler } from '../github-reviews';
 

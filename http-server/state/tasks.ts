@@ -1,4 +1,4 @@
-import type { ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../desktop/settings';
+import type { ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../shared/settings';
 
 export const manualTasks: ManualTaskState[] = [];
 export const recurringTasks: RecurringTaskState[] = [];

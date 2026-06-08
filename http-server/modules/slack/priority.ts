@@ -1,4 +1,4 @@
-import type { SlackNotificationState } from '../../../desktop/settings';
+import type { SlackNotificationState } from '../../../shared/settings';
 import type { SlackNotificationPriority, SlackNotificationPriorityLabel } from '../../types';
 
 export const SLACK_PRIORITY_MENTION: SlackNotificationPriority = { rank: 0, label: 'mention' };

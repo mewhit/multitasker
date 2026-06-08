@@ -1,4 +1,4 @@
-import type { RecurringTaskFrequency } from '../../../desktop/settings';
+import type { RecurringTaskFrequency } from '../../../shared/settings';
 import { readStringField } from '../../utils/payload';
 import { getLocalDateKey } from '../../utils/date';
 

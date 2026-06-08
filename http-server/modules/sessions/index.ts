@@ -1,5 +1,5 @@
 import type { HttpModule, RouteDef } from '../../core/types';
-import type { Session, TerminalUpdate } from '../../../desktop/sessionManager';
+import type { Session, TerminalUpdate } from '../../../shared/sessionManager';
 import { writeJsonResponse } from '../../core/body';
 import { shouldBackendOwnState } from '../../core/constants';
 import { broadcastSseEvent } from '../../core/sse';
@@ -8,7 +8,7 @@ import {
   multitaskerSessionIdByShellSessionId,
   pendingClientMetadataByShellSessionId,
 } from '../../state/sessions';
-import { saveSessions, loadSettings, normalizeClientMetadata } from '../../../desktop/settings';
+import { saveSessions, loadSettings, normalizeClientMetadata } from '../../../shared/settings';
 import { readPayloadString, readStringField, readOptionalNumberField } from '../../utils/payload';
 import { isShellType } from '../../utils/types';
 import { flushPendingTerminalUpdates, flushPendingTerminalEvents, forgetRemovedSession, handleTerminalUpdate } from '../terminals/apply';
@@ -99,6 +99,24 @@ export const sessionsModule: HttpModule = {
       },
       {
         method: 'POST',
+        path: '/api/session/pause',
+        handler({ payload, response }) {
+          const id = readPayloadString(payload, 'id').trim();
+          if (!id) {
+            writeJsonResponse(response, 400, { ok: false, error: 'missing_session_id' });
+            return;
+          }
+          const session = sessionManager.pauseSession(id);
+          if (!session) {
+            writeJsonResponse(response, 404, { ok: false, error: 'session_not_found' });
+            return;
+          }
+          saveSessions(getSessionsStateToSave());
+          writeJsonResponse(response, 200, { ok: true, session });
+        },
+      },
+      {
+        method: 'POST',
         path: '/api/shell/agent-status',
         handler({ payload, response }) {
           handleAgentStatusPost(payload, response);
@@ -163,13 +181,13 @@ function createSessionFromPayload(payload: unknown): Session | null {
   return session;
 }
 
-function parseSshOptionsPayload(value: unknown): import('../../../desktop/settings').SessionSshOptions | undefined {
+function parseSshOptionsPayload(value: unknown): import('../../../shared/settings').SessionSshOptions | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const v = value as Record<string, unknown>;
   const host = typeof v['host'] === 'string' ? v['host'].trim() : '';
   const username = typeof v['username'] === 'string' ? v['username'].trim() : '';
   if (!host || !username) return undefined;
-  const opts: import('../../../desktop/settings').SessionSshOptions = { host, username };
+  const opts: import('../../../shared/settings').SessionSshOptions = { host, username };
   const port = v['port'];
   if (typeof port === 'number' && Number.isFinite(port) && port > 0) opts.port = port;
   const keyPath = v['privateKeyPath'];
@@ -230,6 +248,7 @@ function handleAgentStatusPost(payload: unknown, response: import('http').Server
   let sessionStatus: 'needs_attention' | 'running' | null = null;
   if (status === 'needs_input') sessionStatus = 'needs_attention';
   else if (status === 'working') sessionStatus = 'running';
+  else if (status === 'idle') sessionStatus = 'running';
   if (!sessionStatus) {
     writeJsonResponse(response, 400, { ok: false, error: 'invalid_status' });
     return;
@@ -305,15 +324,15 @@ function handleClientMetadataPost(payload: unknown, response: import('http').Ser
  */
 function maybeRenameFromClientMetadata(
   sessionId: string,
-  metadata: import('../../../desktop/settings').PersistedClientMetadata,
+  metadata: import('../../../shared/settings').PersistedClientMetadata,
 ): void {
   const workspace = metadata.workspace?.trim();
   if (!workspace) return;
   const session = sessionManager.getSession(sessionId);
   if (!session) return;
-  // Only override auto-generated names: `<prefix> <8 hex>` (see
-  // shell/core/multitasker-bridge.ts). Trying both the configured prefix and
-  // a generic fallback so the rule still triggers if the prefix env was set.
+  // Only override auto-generated names: `<prefix> <8 hex>`. Trying both the
+  // configured prefix and a generic fallback so the rule still triggers if the
+  // prefix env was set.
   if (!/^[A-Za-z0-9_-]+\s+[a-f0-9]{8}$/.test(session.name)) return;
   const base = lastPathSegment(workspace);
   if (!base || base === session.name) return;

@@ -1,4 +1,4 @@
-import type { SlackNotificationState } from '../../../desktop/settings';
+import type { SlackNotificationState } from '../../../shared/settings';
 import { getSlackAuthedUserId, slackTeamNameCache } from '../../state/slack';
 import {
   readSlackRecord,

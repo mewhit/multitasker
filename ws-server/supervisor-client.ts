@@ -1,15 +1,15 @@
 import { EventEmitter } from 'events';
 import * as net from 'net';
-import { AUTH_TOKEN } from '../shell/core/constants';
+import { AUTH_TOKEN } from '../shared/shell-constants';
 import { log } from './logger';
-import type { SessionInfo, SshConnectOptions } from '../shell/core/protocol';
+import type { SessionInfo, SshConnectOptions } from '../shared/shell-protocol';
 import {
   IPC_MAX_LINE_BYTES,
   NdjsonLineBuffer,
   parseIpcServerMessage,
   type IpcClientMessage,
   type IpcServerMessage,
-} from '../shell/ipc/protocol';
+} from '../shared/shell-ipc-protocol';
 
 const CONNECT_RETRY_MIN_MS = 100;
 const CONNECT_RETRY_MAX_MS = 2000;
@@ -225,7 +225,7 @@ export class SupervisorClient extends EventEmitter {
     this.buf = new NdjsonLineBuffer(IPC_MAX_LINE_BYTES);
 
     socket.once('connect', () => {
-      log.info('supervisor client connected', { pipePath: this.pipePath });
+      log.info('supervisor client connected', { sourceApp: 'shell-supervisor', pipePath: this.pipePath });
       this.retryDelay = CONNECT_RETRY_MIN_MS;
       const hello: IpcClientMessage = { type: 'hello' };
       if (AUTH_TOKEN) hello.token = AUTH_TOKEN;
@@ -236,14 +236,14 @@ export class SupervisorClient extends EventEmitter {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       const { lines, tooLong } = this.buf.push(text);
       if (tooLong) {
-        log.warn('supervisor sent oversized ipc line, dropping connection');
+        log.warn('supervisor sent oversized ipc line, dropping connection', { sourceApp: 'shell-supervisor' });
         socket.destroy(new Error('oversized ipc line'));
         return;
       }
       for (const line of lines) {
         const parsed = parseIpcServerMessage(line);
         if ('_error' in parsed) {
-          log.warn('bad ipc message from supervisor', { error: parsed._error });
+          log.warn('bad ipc message from supervisor', { sourceApp: 'shell-supervisor', error: parsed._error });
           continue;
         }
         this.handleMessage(parsed);
@@ -251,7 +251,7 @@ export class SupervisorClient extends EventEmitter {
     });
 
     socket.on('error', (err) => {
-      log.warn('supervisor client socket error', { error: err.message });
+      log.warn('supervisor client socket error', { sourceApp: 'shell-supervisor', error: err.message });
     });
 
     socket.on('close', () => {
@@ -266,7 +266,7 @@ export class SupervisorClient extends EventEmitter {
       }
       this.emit('disconnected');
       if (this.destroyed) return;
-      log.info('supervisor client disconnected, reconnecting', { delayMs: this.retryDelay });
+      log.info('supervisor client disconnected, reconnecting', { sourceApp: 'shell-supervisor', delayMs: this.retryDelay });
       const delay = this.retryDelay;
       this.retryDelay = Math.min(this.retryDelay * 2, CONNECT_RETRY_MAX_MS);
       setTimeout(() => this.connect(), delay);
@@ -332,7 +332,7 @@ export class SupervisorClient extends EventEmitter {
         if (msg.id !== undefined && this.pending.has(msg.id)) {
           this.resolvePending(msg);
         } else {
-          log.warn('supervisor reported error', { code: msg.code, message: msg.message });
+          log.warn('supervisor reported error', { sourceApp: 'shell-supervisor', code: msg.code, message: msg.message });
         }
         return;
       }
@@ -369,13 +369,13 @@ export class SupervisorClient extends EventEmitter {
 
   private send(msg: IpcClientMessage): void {
     if (!this.socket || this.socket.destroyed) {
-      log.warn('dropping ipc message: not connected', { type: msg.type });
+      log.warn('dropping ipc message: not connected', { sourceApp: 'shell-supervisor', type: msg.type });
       return;
     }
     try {
       this.socket.write(JSON.stringify(msg) + '\n');
     } catch (e) {
-      log.warn('ipc send failed', { error: (e as Error).message });
+      log.warn('ipc send failed', { sourceApp: 'shell-supervisor', error: (e as Error).message });
     }
   }
 

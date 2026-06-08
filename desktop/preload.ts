@@ -195,8 +195,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getManualTasks: (): Promise<ManualTask[]> =>
     ipcRenderer.invoke('manual-task:list'),
 
-  addManualTask: (text: string): Promise<ManualTask | null> =>
-    ipcRenderer.invoke('manual-task:add', text),
+  addManualTask: (text: string, createdAt?: number): Promise<ManualTask | null> =>
+    ipcRenderer.invoke('manual-task:add', text, createdAt),
 
   removeManualTask: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('manual-task:remove', id),

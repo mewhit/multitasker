@@ -16,6 +16,20 @@ const gracefulShutdownMs = 2000;
 const probeIntervalMs = 100;
 const probeTimeoutMs = 10000;
 
+function defaultTmpLogPath(appName, logName) {
+  return path.join(projectRoot, '.tmp', appName, logName);
+}
+
+function resolveAppLogFile(appEnvName, appName, logName) {
+  const specific = process.env[appEnvName];
+  if (specific && specific.trim()) return specific.trim();
+  const legacy = process.env.SHELL_LOG_FILE;
+  if (legacy && legacy.trim()) {
+    return path.join(path.dirname(legacy.trim()), appName, logName);
+  }
+  return defaultTmpLogPath(appName, logName);
+}
+
 function pipePath() {
   const override = process.env.MULTITASKER_SHELL_PIPE;
   if (override && override.trim()) return override.trim();
@@ -55,7 +69,10 @@ async function main() {
   const supervisor = spawn(process.execPath, [supervisorEntry], {
     cwd: projectRoot,
     stdio: 'inherit',
-    env: process.env,
+    env: {
+      ...process.env,
+      SHELL_LOG_FILE: resolveAppLogFile('SHELL_SUPERVISOR_LOG_FILE', 'shell-supervisor', 'supervisor.log'),
+    },
   });
   log(`supervisor pid ${supervisor.pid}`);
 
@@ -107,7 +124,10 @@ async function main() {
   gateway = spawn(process.execPath, [gatewayEntry], {
     cwd: projectRoot,
     stdio: 'inherit',
-    env: process.env,
+    env: {
+      ...process.env,
+      SHELL_LOG_FILE: resolveAppLogFile('SHELL_GATEWAY_LOG_FILE', 'ws-server', 'server.log'),
+    },
   });
   log(`gateway pid ${gateway.pid}`);
   gateway.once('exit', (code, signal) => {

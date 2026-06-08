@@ -1,0 +1,25 @@
+{
+  "name": "@multitasker/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "concurrently -k -n tsc:desktop,electron -c blue,green \"tsc -w -p tsconfig.json\" \"node ..\\scripts\\dev-electron.js\"",
+    "start": "electron .."
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "concurrently": "^9.2.1",
+    "electron": "^42.0.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "@slack/web-api": "^7.16.0",
+    "node-window-manager": "^2.2.4",
+    "ws": "^8.21.0"
+  }
+}

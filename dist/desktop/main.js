@@ -46,7 +46,7 @@ const MAX_SLACK_NOTIFICATIONS = 100;
 const MAX_SLACK_TEXT_LENGTH = 4000;
 const MAX_SLACK_DEBUG_TEXT_LENGTH = 700;
 const MAX_PENDING_TERMINAL_EVENTS_PER_SESSION = 200;
-const DEBUG_LOG_DIRECTORY = 'debug-log';
+const DEBUG_LOG_DIRECTORY = node_path_1.default.join('.tmp', 'desktop');
 const DEBUG_LOG_FILE_EXTENSION = '.log';
 const TERMINAL_UPDATE_DEBUG_ENV = 'MULTITASKER_DEBUG_TERMINAL';
 const SLACK_AUTH_DEBUG_LOG_FILE = 'slack-auth.log';
@@ -1071,16 +1071,19 @@ function findSessionForTerminalIdentity(identity) {
     return sessions.find(session => !session.terminalRef?.trim() &&
         normalizePathForCompare(session.cwd) === normalizedTerminalPath) ?? null;
 }
-function createManualTask(textValue) {
+function createManualTask(textValue, createdAtValue) {
     const text = typeof textValue === 'string' ? textValue.trim() : '';
     if (!text) {
         console.error('Failed to add manual task: task text is required');
         return null;
     }
+    const createdAt = typeof createdAtValue === 'number' && Number.isFinite(createdAtValue)
+        ? createdAtValue
+        : Date.now();
     return addManualTask({
         id: `manual-${(0, node_crypto_1.randomUUID)()}`,
         text: truncateManualTaskText(text),
-        createdAt: Date.now(),
+        createdAt,
     });
 }
 function readManualTaskText(payload) {
@@ -3410,7 +3413,7 @@ function setupLegacyIpc() {
         handleGoogleCalendarSettingsChanged();
     });
     electron_1.ipcMain.handle('manual-task:list', () => manualTasks.map(task => ({ ...task })));
-    electron_1.ipcMain.handle('manual-task:add', (_event, text) => createManualTask(text));
+    electron_1.ipcMain.handle('manual-task:add', (_event, text, createdAt) => createManualTask(text, createdAt));
     electron_1.ipcMain.handle('manual-task:remove', (_event, id) => {
         if (typeof id !== 'string' || !id.trim()) {
             console.error('Failed to remove manual task: missing task id');
@@ -3495,19 +3498,25 @@ function setupBackendIpc() {
             return false;
         }
     });
-    electron_1.ipcMain.handle('session:pause', (_e, id) => {
+    electron_1.ipcMain.handle('session:pause', async (_e, id) => {
         const sessionId = typeof id === 'string' ? id.trim() : '';
         if (!sessionId) {
             console.error('Failed to pause session: missing session id');
             return null;
         }
-        const session = sessionManager?.pauseSession(sessionId) ?? null;
-        if (!session) {
-            console.error(`Failed to pause session: session "${sessionId}" was not found`);
+        try {
+            const result = await backendPost('/api/session/pause', { id: sessionId });
+            if (result.session) {
+                applyBackendSessions(backendState.sessions.map(s => s.id === sessionId ? result.session : s));
+                debugTerminalUpdate('session paused (backend)', { id: result.session.id, status: result.session.status });
+                return result.session;
+            }
             return null;
         }
-        debugTerminalUpdate('session paused', { id: session.id, status: session.status });
-        return session;
+        catch (error) {
+            console.error(`Failed to pause session: ${getErrorMessage(error)}`);
+            return null;
+        }
     });
     electron_1.ipcMain.handle('session:list', async () => {
         try {
@@ -3560,9 +3569,12 @@ function setupBackendIpc() {
             return manualTasks.map(task => ({ ...task }));
         }
     });
-    electron_1.ipcMain.handle('manual-task:add', async (_event, text) => {
+    electron_1.ipcMain.handle('manual-task:add', async (_event, text, createdAt) => {
         try {
-            const result = await backendPost('/api/manual-task/add', { text });
+            const body = { text };
+            if (typeof createdAt === 'number' && Number.isFinite(createdAt))
+                body['createdAt'] = createdAt;
+            const result = await backendPost('/api/manual-task/add', body);
             return result.task;
         }
         catch (error) {

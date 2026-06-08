@@ -7,11 +7,11 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*;"
     />
-    <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
-    <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
-    <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
-    <script src="../node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
-    <script src="../node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"></script>
+    <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css" />
+    <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+    <script src="./node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+    <script src="./node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"></script>
     <title>Multitasker</title>
     <style>
       :root {
@@ -1023,6 +1023,13 @@
           <label>Task text</label>
           <textarea id="input-manual-task-text" placeholder="What needs to be done?"></textarea>
         </div>
+        <div class="form-group">
+          <label>Date &amp; time</label>
+          <div class="form-row">
+            <input id="input-manual-task-date" type="date" />
+            <input id="input-manual-task-time" type="time" />
+          </div>
+        </div>
         <div class="modal-footer">
           <button class="btn" id="btn-cancel-manual-task">Cancel</button>
           <button class="btn btn-primary" id="btn-confirm-manual-task">Add</button>
@@ -1183,6 +1190,8 @@
       // ============================================================
       const shellPtyIds = new Set(loadShellPtyIds());
       let shellTerminalState = null; // {sessionId, ws, term, fitAddon, resizeObserver, onResize}
+      let shellStatusSocket = null; // { ws, url, token, reconnectTimer, reconnectDelay, connecting, connected }
+      const watchedStatusSessionIds = new Set();
       const TYPING_IDLE_MS = 1000;
       let shellMountToken = 0;
       // Diagnostic: track output bytes flowing into xterm, log per second when active.
@@ -1221,13 +1230,144 @@
         if (!id) return;
         shellPtyIds.add(id);
         saveShellPtyIds();
+        syncStatusWatchSubscriptions();
       }
       function removeShellPtyId(id) {
         if (!id) return;
-        if (shellPtyIds.delete(id)) saveShellPtyIds();
+        if (shellPtyIds.delete(id)) {
+          saveShellPtyIds();
+          syncStatusWatchSubscriptions();
+        }
       }
       function isShellPtySession(s) {
         return !!(s && shellPtyIds.has(s.id));
+      }
+
+      function shouldWatchStatusForSession(s) {
+        if (!isShellPtySession(s)) return false;
+        const st = normalizeStatus(s.status);
+        return st !== "stopped" && st !== "error" && st !== "detached";
+      }
+
+      function applyLiveAgentStatus(msg) {
+        if (!msg || !msg.sessionId) return;
+        const idx = sessions.findIndex((s) => s.id === msg.sessionId);
+        if (idx < 0) return;
+        const current = sessions[idx];
+        const currentStatus = normalizeStatus(current.status);
+        if (currentStatus === "stopped" || currentStatus === "error" || currentStatus === "detached" || currentStatus === "paused") return;
+
+        let nextStatus = currentStatus;
+        if (msg.status === "working") nextStatus = "running";
+        else if (msg.status === "needs_input") nextStatus = "needs_attention";
+        else if (msg.status === "idle") nextStatus = "waiting";
+        if (nextStatus === currentStatus) return;
+
+        sessions[idx] = {
+          ...current,
+          status: nextStatus,
+          lastActivity: typeof msg.occurredAt === "number" ? msg.occurredAt : Date.now(),
+        };
+        scheduleListRender(sessions);
+      }
+
+      function desiredStatusWatchIds() {
+        return new Set(
+          sessions.filter((s) => shouldWatchStatusForSession(s)).map((s) => s.id),
+        );
+      }
+
+      function syncStatusWatchSubscriptions() {
+        const state = shellStatusSocket;
+        if (!state || !state.ws || state.ws.readyState !== WebSocket.OPEN || !state.connected) return;
+        const desired = desiredStatusWatchIds();
+        for (const sessionId of desired) {
+          if (watchedStatusSessionIds.has(sessionId)) continue;
+          try { state.ws.send(JSON.stringify({ type: "watch_status", sessionId })); } catch {}
+          watchedStatusSessionIds.add(sessionId);
+        }
+        for (const sessionId of Array.from(watchedStatusSessionIds)) {
+          if (desired.has(sessionId)) continue;
+          try { state.ws.send(JSON.stringify({ type: "unwatch_status", sessionId })); } catch {}
+          watchedStatusSessionIds.delete(sessionId);
+        }
+      }
+
+      async function startShellStatusSocket() {
+        if (
+          shellStatusSocket &&
+          (
+            shellStatusSocket.connecting ||
+            (shellStatusSocket.ws &&
+              (shellStatusSocket.ws.readyState === WebSocket.OPEN || shellStatusSocket.ws.readyState === WebSocket.CONNECTING))
+          )
+        ) {
+          return;
+        }
+        let cfg;
+        try {
+          cfg = await api.getShellServerConfig();
+        } catch {
+          return;
+        }
+        const url = (cfg && cfg.url) || "ws://127.0.0.1:4321";
+        const token = (cfg && cfg.token) || "";
+        const state = {
+          ws: null,
+          url,
+          token,
+          reconnectTimer: 0,
+          reconnectDelay: 200,
+          connecting: true,
+          connected: false,
+        };
+        shellStatusSocket = state;
+        const ws = new WebSocket(url);
+        state.ws = ws;
+        ws.addEventListener("open", () => {
+          state.connecting = false;
+          if (token) {
+            try { ws.send(JSON.stringify({ type: "hello", token })); } catch {}
+          }
+        });
+        ws.addEventListener("message", (ev) => {
+          let msg;
+          try {
+            msg = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
+          } catch {
+            return;
+          }
+          if (msg.type === "ready") {
+            if (!msg.requiresAuth || msg.authenticated) {
+              state.connected = true;
+              syncStatusWatchSubscriptions();
+            }
+            return;
+          }
+          if (msg.type === "authenticated") {
+            state.connected = true;
+            syncStatusWatchSubscriptions();
+            return;
+          }
+          if (msg.type === "agent_status") {
+            applyLiveAgentStatus(msg);
+          }
+        });
+        ws.addEventListener("close", () => {
+          watchedStatusSessionIds.clear();
+          state.connected = false;
+          state.connecting = false;
+          if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+          const delay = Math.min(state.reconnectDelay, 5000);
+          state.reconnectDelay = Math.min(state.reconnectDelay * 2, 5000);
+          state.reconnectTimer = window.setTimeout(() => {
+            state.reconnectTimer = 0;
+            startShellStatusSocket();
+          }, delay);
+        });
+        ws.addEventListener("error", () => {
+          state.connecting = false;
+        });
       }
 
       function setShellTerminalStatus(text, exited) {
@@ -1795,13 +1935,16 @@
         });
       }
 
+      startShellStatusSocket();
       api.getSessions().then((list) => {
         sessions = list;
         scheduleListRender(list);
+        syncStatusWatchSubscriptions();
       });
       api.onListUpdate((list) => {
         sessions = list;
         scheduleListRender(list);
+        syncStatusWatchSubscriptions();
       });
       if (api.getManualTasks) {
         api.getManualTasks().then((list) => {
@@ -1902,6 +2045,7 @@
           }
         }
         sessions = [session, ...sessions.filter((existing) => existing.id !== session.id)];
+        syncStatusWatchSubscriptions();
       }
 
       function scheduleListRender(list) {
@@ -2888,6 +3032,12 @@
         closeSidebarAddMenu();
         const input = document.getElementById("input-manual-task-text");
         input.value = "";
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, "0");
+        document.getElementById("input-manual-task-date").value =
+          now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
+        document.getElementById("input-manual-task-time").value =
+          pad(now.getHours()) + ":" + pad(now.getMinutes());
         document.getElementById("manual-task-modal").classList.remove("hidden");
         setTimeout(() => input.focus(), 50);
       }
@@ -2908,7 +3058,17 @@
           return;
         }
 
-        const task = await api.addManualTask(text);
+        const dateVal = document.getElementById("input-manual-task-date").value;
+        const timeVal = document.getElementById("input-manual-task-time").value;
+        let createdAt;
+        if (dateVal && timeVal) {
+          const parsed = new Date(dateVal + "T" + timeVal);
+          createdAt = Number.isFinite(parsed.getTime()) ? parsed.getTime() : Date.now();
+        } else {
+          createdAt = Date.now();
+        }
+
+        const task = await api.addManualTask(text, createdAt);
         if (!task) {
           alert("Could not add this task.");
           return;

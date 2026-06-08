@@ -1,4 +1,4 @@
-import type { SlackNotificationState } from '../../../desktop/settings';
+import type { SlackNotificationState } from '../../../shared/settings';
 import type { SlackNotificationDismissRequest } from '../../types';
 import { slackNotifications } from '../../state/tasks';
 import { MAX_SLACK_NOTIFICATIONS } from '../../core/constants';

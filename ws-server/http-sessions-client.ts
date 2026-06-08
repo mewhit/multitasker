@@ -4,7 +4,7 @@ import { log } from './logger';
 
 /**
  * Desktop session info from HTTP-server.
- * This is different from shell/core/protocol.ts#SessionInfo
+ * This is different from shared/shell-protocol.ts#SessionInfo
  * (which is for PTY/SSH sessions in the supervisor).
  */
 export interface DesktopSessionInfo {
@@ -80,7 +80,7 @@ export class HttpSessionsClient {
       const result = (await makeHttpRequest('GET', '/api/sessions')) as { ok: boolean; sessions: DesktopSessionInfo[] };
       return result.sessions || [];
     } catch (err) {
-      log.error('http-sessions: failed to list sessions', { error: (err as Error).message });
+      log.error('http-sessions: failed to list sessions', { sourceApp: 'http-server', error: (err as Error).message });
       return [];
     }
   }
@@ -90,7 +90,7 @@ export class HttpSessionsClient {
       const result = (await makeHttpRequest('GET', `/api/session/${sessionId}`)) as { ok: boolean; session: DesktopSessionInfo };
       return result.session || null;
     } catch (err) {
-      log.error('http-sessions: failed to get session', { sessionId, error: (err as Error).message });
+      log.error('http-sessions: failed to get session', { sourceApp: 'http-server', sessionId, error: (err as Error).message });
       return null;
     }
   }
@@ -103,7 +103,7 @@ export class HttpSessionsClient {
       };
       return result.session || null;
     } catch (err) {
-      log.error('http-sessions: failed to rename session', { sessionId, name, error: (err as Error).message });
+      log.error('http-sessions: failed to rename session', { sourceApp: 'http-server', sessionId, name, error: (err as Error).message });
       return null;
     }
   }
@@ -113,7 +113,7 @@ export class HttpSessionsClient {
       const result = (await makeHttpRequest('POST', '/api/session/remove', { id: sessionId })) as { ok: boolean };
       return result.ok === true;
     } catch (err) {
-      log.error('http-sessions: failed to remove session', { sessionId, error: (err as Error).message });
+      log.error('http-sessions: failed to remove session', { sourceApp: 'http-server', sessionId, error: (err as Error).message });
       return false;
     }
   }
@@ -126,7 +126,7 @@ export class HttpSessionsClient {
       };
       return result.session || null;
     } catch (err) {
-      log.error('http-sessions: failed to touch session', { sessionId, error: (err as Error).message });
+      log.error('http-sessions: failed to touch session', { sourceApp: 'http-server', sessionId, error: (err as Error).message });
       return null;
     }
   }

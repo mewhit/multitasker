@@ -18,7 +18,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
         electron_1.ipcRenderer.on('session:list-update', (_event, sessions) => cb(sessions));
     },
     getManualTasks: () => electron_1.ipcRenderer.invoke('manual-task:list'),
-    addManualTask: (text) => electron_1.ipcRenderer.invoke('manual-task:add', text),
+    addManualTask: (text, createdAt) => electron_1.ipcRenderer.invoke('manual-task:add', text, createdAt),
     removeManualTask: (id) => electron_1.ipcRenderer.invoke('manual-task:remove', id),
     onManualTaskListUpdate: (cb) => {
         electron_1.ipcRenderer.on('manual-task:list-update', (_event, tasks) => cb(tasks));

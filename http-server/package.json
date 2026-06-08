@@ -1,0 +1,17 @@
+{
+  "name": "@multitasker/http-server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "start": "node ..\\dist\\http-server\\server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.16.0"
+  }
+}

@@ -9,7 +9,7 @@ const distDir = path.join(projectRoot, 'dist');
 const shellDistDir = path.join(distDir, 'shell');
 const wsServerDistDir = path.join(distDir, 'ws-server');
 const serverFile = path.join(wsServerDistDir, 'server.js');
-const defaultLogFile = path.join(projectRoot, '.tmp', 'shell.log');
+const defaultLogFile = path.join(projectRoot, '.tmp', 'ws-server', 'server.log');
 const restartDebounceMs = 300;
 const fileCheckMs = 250;
 const gracefulShutdownMs = 2000;
@@ -22,6 +22,16 @@ const watchers = [];
 
 function log(message) {
   console.log(`[dev-shell] ${message}`);
+}
+
+function resolveLogFile() {
+  const specific = process.env.SHELL_GATEWAY_LOG_FILE;
+  if (specific && specific.trim()) return specific.trim();
+  const legacy = process.env.SHELL_LOG_FILE;
+  if (legacy && legacy.trim()) {
+    return path.join(path.dirname(legacy.trim()), 'ws-server', 'server.log');
+  }
+  return defaultLogFile;
 }
 
 function waitForBuild() {
@@ -38,9 +48,7 @@ function waitForBuild() {
 
 function startShell(reason) {
   if (shuttingDown || child) return;
-  // Default to info (not debug) + no log file in dev. See dev-supervisor.js
-  // for rationale - file I/O on the hotpath was visible as input lag.
-  const logFile = process.env.SHELL_LOG_FILE ?? '';
+  const logFile = resolveLogFile();
   const logLevel = process.env.SHELL_LOG_LEVEL || 'info';
   log(`${reason}: starting shell server (log level=${logLevel}, log file=${logFile || '<stderr only>'})`);
   child = spawn(process.execPath, [serverFile], {

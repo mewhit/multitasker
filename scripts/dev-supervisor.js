@@ -15,7 +15,7 @@ const projectRoot = path.resolve(__dirname, '..');
 loadDotenv(path.join(projectRoot, '.env'));
 const distDir = path.join(projectRoot, 'dist');
 const supervisorEntry = path.join(distDir, 'shell', 'supervisor', 'index.js');
-const defaultLogFile = path.join(projectRoot, '.tmp', 'shell.log');
+const defaultLogFile = path.join(projectRoot, '.tmp', 'shell-supervisor', 'supervisor.log');
 const watchDirs = [
   path.join(distDir, 'shell', 'supervisor'),
   path.join(distDir, 'shell', 'ipc'),
@@ -33,6 +33,16 @@ function log(msg) {
   console.log(`[dev-supervisor] ${msg}`);
 }
 
+function resolveLogFile() {
+  const specific = process.env.SHELL_SUPERVISOR_LOG_FILE;
+  if (specific && specific.trim()) return specific.trim();
+  const legacy = process.env.SHELL_LOG_FILE;
+  if (legacy && legacy.trim()) {
+    return path.join(path.dirname(legacy.trim()), 'shell-supervisor', 'supervisor.log');
+  }
+  return defaultLogFile;
+}
+
 function waitForBuild() {
   if (fs.existsSync(supervisorEntry)) return Promise.resolve();
   log('waiting for dist\\shell\\supervisor\\index.js...');
@@ -47,12 +57,7 @@ function waitForBuild() {
 
 function startSupervisor() {
   if (shuttingDown || child) return;
-  // Default to info (not debug) + no log file in dev. The per-chunk debug
-  // logs were causing visible input lag because each emit() does up to 3
-  // synchronous appendFileSync calls (stderr + main file + per-session
-  // file). Opt back in by exporting SHELL_LOG_LEVEL=debug and/or
-  // SHELL_LOG_FILE=path before `yarn dev` when you need to diagnose.
-  const logFile = process.env.SHELL_LOG_FILE ?? '';
+  const logFile = resolveLogFile();
   const logLevel = process.env.SHELL_LOG_LEVEL || 'info';
   log(`starting supervisor (log level=${logLevel}, log file=${logFile || '<stderr only>'})`);
   child = spawn(process.execPath, [supervisorEntry], {

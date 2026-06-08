@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { ManualTaskState } from '../../../desktop/settings';
-import { saveManualTasks } from '../../../desktop/settings';
+import type { ManualTaskState } from '../../../shared/settings';
+import { saveManualTasks } from '../../../shared/settings';
 import { manualTasks } from '../../state/tasks';
 import { MAX_MANUAL_TASKS } from '../../core/constants';
 import { truncateTaskText } from '../../utils/date';

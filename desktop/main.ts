@@ -77,7 +77,7 @@ const MAX_SLACK_NOTIFICATIONS = 100;
 const MAX_SLACK_TEXT_LENGTH = 4000;
 const MAX_SLACK_DEBUG_TEXT_LENGTH = 700;
 const MAX_PENDING_TERMINAL_EVENTS_PER_SESSION = 200;
-const DEBUG_LOG_DIRECTORY = 'debug-log';
+const DEBUG_LOG_DIRECTORY = path.join('.tmp', 'desktop');
 const DEBUG_LOG_FILE_EXTENSION = '.log';
 const TERMINAL_UPDATE_DEBUG_ENV = 'MULTITASKER_DEBUG_TERMINAL';
 const SLACK_AUTH_DEBUG_LOG_FILE = 'slack-auth.log';
@@ -1376,17 +1376,21 @@ function findSessionForTerminalIdentity(identity: TerminalEventIdentity): Sessio
   ) ?? null;
 }
 
-function createManualTask(textValue: unknown): ManualTaskState | null {
+function createManualTask(textValue: unknown, createdAtValue?: unknown): ManualTaskState | null {
   const text = typeof textValue === 'string' ? textValue.trim() : '';
   if (!text) {
     console.error('Failed to add manual task: task text is required');
     return null;
   }
 
+  const createdAt = typeof createdAtValue === 'number' && Number.isFinite(createdAtValue)
+    ? createdAtValue
+    : Date.now();
+
   return addManualTask({
     id: `manual-${randomUUID()}`,
     text: truncateManualTaskText(text),
-    createdAt: Date.now(),
+    createdAt,
   });
 }
 
@@ -3904,7 +3908,7 @@ function setupLegacyIpc(): void {
 
   ipcMain.handle('manual-task:list', () => manualTasks.map(task => ({ ...task })));
 
-  ipcMain.handle('manual-task:add', (_event, text: unknown) => createManualTask(text));
+  ipcMain.handle('manual-task:add', (_event, text: unknown, createdAt?: unknown) => createManualTask(text, createdAt));
 
   ipcMain.handle('manual-task:remove', (_event, id: unknown) => {
     if (typeof id !== 'string' || !id.trim()) {
@@ -4000,19 +4004,24 @@ function setupBackendIpc(): void {
     }
   });
 
-  ipcMain.handle('session:pause', (_e, id: unknown) => {
+  ipcMain.handle('session:pause', async (_e, id: unknown) => {
     const sessionId = typeof id === 'string' ? id.trim() : '';
     if (!sessionId) {
       console.error('Failed to pause session: missing session id');
       return null;
     }
-    const session = sessionManager?.pauseSession(sessionId) ?? null;
-    if (!session) {
-      console.error(`Failed to pause session: session "${sessionId}" was not found`);
+    try {
+      const result = await backendPost<{ ok: boolean; session?: Session }>('/api/session/pause', { id: sessionId });
+      if (result.session) {
+        applyBackendSessions(backendState.sessions.map(s => s.id === sessionId ? result.session! : s));
+        debugTerminalUpdate('session paused (backend)', { id: result.session.id, status: result.session.status });
+        return result.session;
+      }
+      return null;
+    } catch (error) {
+      console.error(`Failed to pause session: ${getErrorMessage(error)}`);
       return null;
     }
-    debugTerminalUpdate('session paused', { id: session.id, status: session.status });
-    return session;
   });
 
   ipcMain.handle('session:list', async () => {
@@ -4067,9 +4076,11 @@ function setupBackendIpc(): void {
     }
   });
 
-  ipcMain.handle('manual-task:add', async (_event, text: unknown) => {
+  ipcMain.handle('manual-task:add', async (_event, text: unknown, createdAt?: unknown) => {
     try {
-      const result = await backendPost<BackendManualTaskResponse>('/api/manual-task/add', { text });
+      const body: Record<string, unknown> = { text };
+      if (typeof createdAt === 'number' && Number.isFinite(createdAt)) body['createdAt'] = createdAt;
+      const result = await backendPost<BackendManualTaskResponse>('/api/manual-task/add', body);
       return result.task;
     } catch (error) {
       console.error(`Failed to add manual task: ${getErrorMessage(error)}`);

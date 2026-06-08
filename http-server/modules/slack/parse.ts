@@ -1,4 +1,4 @@
-import type { SlackNotificationState } from '../../../desktop/settings';
+import type { SlackNotificationState } from '../../../shared/settings';
 import { MAX_SLACK_TEXT_LENGTH, MAX_SLACK_DEBUG_TEXT_LENGTH } from '../../core/constants';
 import { readStringField, readOptionalNumberField } from '../../utils/payload';
 import { normalizeSlackPriorityRank, isSlackNotificationPriorityLabel } from './priority';

@@ -1,7 +1,7 @@
-import { SessionManager } from '../../desktop/sessionManager';
-import type { TerminalUpdate } from '../../desktop/sessionManager';
-import type { TerminalEvent } from '../../desktop/terminalEvents';
-import { setStorageDirectory } from '../../desktop/settings';
+import { SessionManager } from '../../shared/sessionManager';
+import type { TerminalUpdate } from '../../shared/sessionManager';
+import type { TerminalEvent } from '../../shared/terminalEvents';
+import { setStorageDirectory } from '../../shared/settings';
 
 // Storage directory initialization
 const storageDirectory = process.env['MULTITASKER_DATA_DIR']?.trim() || process.env['MULTITASKER_STORAGE_DIR']?.trim();
@@ -29,5 +29,5 @@ export const multitaskerSessionIdByShellSessionId = new Map<string, string>();
  */
 export const pendingClientMetadataByShellSessionId = new Map<
   string,
-  import('../../desktop/settings').PersistedClientMetadata
+  import('../../shared/settings').PersistedClientMetadata
 >();

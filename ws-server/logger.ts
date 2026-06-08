@@ -1,3 +1,3 @@
-import { createLogger } from '../shell/core/logger';
+import { createLogger } from '../shared/logger';
 
-export const log = createLogger('ws');
+export const log = createLogger('ws', 'ws-server');

@@ -1,4 +1,4 @@
-import type { ManualTaskState } from '../../../desktop/settings';
+import type { ManualTaskState } from '../../../shared/settings';
 import { shouldBackendOwnState } from '../../core/constants';
 import { broadcastSseEvent } from '../../core/sse';
 import { cloneManualTask } from '../../utils/clone';

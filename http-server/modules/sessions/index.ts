@@ -248,7 +248,7 @@ function handleAgentStatusPost(payload: unknown, response: import('http').Server
   let sessionStatus: 'needs_attention' | 'running' | null = null;
   if (status === 'needs_input') sessionStatus = 'needs_attention';
   else if (status === 'working') sessionStatus = 'running';
-  else if (status === 'idle') sessionStatus = 'running';
+  else if (status === 'idle') sessionStatus = 'needs_attention';
   if (!sessionStatus) {
     writeJsonResponse(response, 400, { ok: false, error: 'invalid_status' });
     return;

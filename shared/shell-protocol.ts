@@ -135,7 +135,7 @@ export type ServerMessage =
   | {
       type: 'agent_status';
       sessionId: string;
-      status: 'working' | 'needs_input' | 'idle';
+      status: 'working' | 'needs_input';
       agentKind: 'codex' | 'copilot' | 'claude' | 'gemini' | 'generic';
       reason?: string;
       matchedText?: string;

@@ -16,11 +16,9 @@
 //   * 'working'      - the screen changed since the last tick (>= some
 //                      minimum delta to ignore cursor-blink-only noise) OR
 //                      we received a fresh chunk this tick.
-//   * 'needs_input'  - screen has been stable for IDLE_TIMEOUT_MS AND the
-//                      bottom non-empty line looks like a prompt
-//                      (`â€º`/`â¯`, `(y/N)`, `: `, etc).
-//   * 'idle'         - screen has been stable for IDLE_TIMEOUT_MS AND no
-//                      prompt is visible.
+//   * 'needs_input'  - screen has been stable for IDLE_TIMEOUT_MS, regardless
+//                      of whether a prompt was detected. Prompt visibility is
+//                      still captured in the reason text for diagnostics.
 //
 // User input/focus signals are treated as context (guards against false
 // "working" promotions on redraw/focus noise), not as proof that the agent
@@ -30,7 +28,7 @@ import { Terminal } from '@xterm/headless';
 import { log } from './logger';
 
 export type AgentKind = 'codex' | 'copilot' | 'claude' | 'gemini' | 'generic';
-export type AgentStatus = 'working' | 'needs_input' | 'idle';
+export type AgentStatus = 'working' | 'needs_input';
 
 export interface AgentStatusChange {
   status: AgentStatus;
@@ -43,7 +41,7 @@ const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 40;
 // Time the screen must be stable before we leave 'working'.
 const IDLE_TIMEOUT_MS = 5000;
-// Time after user input during which we never demote to needs_input/idle â€”
+// Time after user input during which we never demote to needs_input â€”
 // gives the agent a chance to repaint a spinner.
 const STDIN_INPUT_GRACE_MS = 4000;
 // Minimum interval between two status changes for the same session, to
@@ -129,7 +127,7 @@ interface SessionState {
   /** Terminal focus signal from the UI layer. */
   terminalFocused: boolean;
   lastFocusSignalAt: number;
-  workingIdleTransitions: Array<{ status: 'working' | 'idle'; at: number }>;
+  workingNeedsInputTransitions: Array<{ status: 'working' | 'needs_input'; at: number }>;
   flappingUntil: number;
   /** Set when we received chunks since the last tick â€” tick will refresh
    *  lastScreenChangeAt if the screen actually moved. */
@@ -227,6 +225,14 @@ export class OutputAnalyzer {
       state.pendingBytes -= dropped.length;
     }
     state.hadChunkSinceTick = true;
+    // When we're already waiting for user input, don't immediately promote
+    // back to "working" on raw PTY chunks. Interactive prompts often keep
+    // emitting control/noise chunks that do not reflect real agent progress.
+    // `tick()` will promote to working again only if the visible screen
+    // actually changes.
+    if (state.lastStatus === 'needs_input') {
+      return null;
+    }
     if (state.lastStatus !== 'working') {
       const suppressReason = this.getWorkingSuppressionReason(state, now);
       if (suppressReason) return null;
@@ -262,7 +268,8 @@ export class OutputAnalyzer {
    * headless terminal (the only place the VT parser runs now), snapshot the
    * screen, compare with the last snapshot. If changed, refresh
    * lastScreenChangeAt and stay 'working'. If stable for IDLE_TIMEOUT_MS,
-   * classify the bottom line as prompt â†’ 'needs_input' or empty â†’ 'idle'.
+   * classify a stable screen as 'needs_input'. Prompt visibility is preserved
+   * in the transition reason for debugging.
    *
    * Async because xterm-headless's `write()` is queued; we need to wait for
    * the parser to drain before snapshotting the screen.
@@ -315,8 +322,8 @@ export class OutputAnalyzer {
       // Fallback for "stuck in working": if we saw no shell output for a long
       // time while still marked as working, force needs_input once.
       //
-      // Do NOT apply this when already idle/needs_input, otherwise we'd bounce
-      // between idle and needs_input on every tick with no new output.
+      // Do NOT apply this when already needs_input, otherwise we'd bounce on
+      // every tick with no new output.
       if (
         state.lastStatus === 'working' &&
         sinceOutput >= NO_OUTPUT_NEEDS_INPUT_MS
@@ -334,28 +341,6 @@ export class OutputAnalyzer {
 
       const bottomLines = bottomNonEmptyLines(state.term, BOTTOM_SCAN_LINES);
       const bottomBlock = bottomLines.join('\n');
-      const overrideMatch = bottomLines.length
-        ? RUNNING_OVERRIDE_PATTERNS.find(p => p.test(bottomBlock))
-        : undefined;
-      if (overrideMatch) {
-        const sinceOutput = state.lastOutputAt > 0 ? now - state.lastOutputAt : Infinity;
-        if (sinceOutput > INTERRUPT_OVERRIDE_RECENT_OUTPUT_MS) {
-          // Static footer text like "esc to cancel" can stay visible even when
-          // the agent is not emitting output. Don't force working unless output
-          // was seen recently.
-          continue;
-        }
-        // The screen happens to look stable but the agent is showing an
-        // active "esc to interrupt" footer. Treat as working and refresh
-        // the change timestamp so we don't keep re-evaluating.
-        state.lastScreenChangeAt = now;
-        if (state.lastStatus !== 'working') {
-          const change = this.transition(state, sessionId, 'working', 'interrupt affordance visible', now);
-          if (change) out.push({ sessionId, change });
-        }
-        continue;
-      }
-
       // Walk the bottom lines from the very last upward and look for the
       // first prompt match. Agents like codex keep a permanent footer line
       // (e.g. "  gpt-5.5 xhigh Â· C:\dev\robot") below their input prompt
@@ -375,7 +360,31 @@ export class OutputAnalyzer {
         }
       }
 
-      const proposed: AgentStatus = promptMatch ? 'needs_input' : 'idle';
+      const overrideMatch = bottomLines.length
+        ? RUNNING_OVERRIDE_PATTERNS.find(p => p.test(bottomBlock))
+        : undefined;
+      // Prompt wins over interrupt affordance text. Interactive approval
+      // screens often include "esc to cancel" while still waiting for user input.
+      if (overrideMatch && !promptMatch) {
+        const sinceOutput = state.lastOutputAt > 0 ? now - state.lastOutputAt : Infinity;
+        if (sinceOutput > INTERRUPT_OVERRIDE_RECENT_OUTPUT_MS) {
+          // Static footer text like "esc to cancel" can stay visible even when
+          // the agent is not emitting output. Don't force working unless output
+          // was seen recently.
+          continue;
+        }
+        // The screen happens to look stable but the agent is showing an
+        // active "esc to interrupt" footer. Treat as working and refresh
+        // the change timestamp so we don't keep re-evaluating.
+        state.lastScreenChangeAt = now;
+        if (state.lastStatus !== 'working') {
+          const change = this.transition(state, sessionId, 'working', 'interrupt affordance visible', now);
+          if (change) out.push({ sessionId, change });
+        }
+        continue;
+      }
+
+      const proposed: AgentStatus = 'needs_input';
       if (state.lastStatus === proposed) continue;
 
       const reason = promptMatch
@@ -412,20 +421,18 @@ export class OutputAnalyzer {
     const previousStatus = state.lastStatus;
     let nextStatus: AgentStatus = status;
     let nextReason = reason;
-    if (this.isWorkingIdleFlapping(state, status, now)) {
+    if (this.isWorkingNeedsInputFlapping(state, status, now)) {
       nextStatus = 'needs_input';
-      nextReason = `working/idle loop detected; ${reason}`;
+      nextReason = `working/needs_input loop detected; ${reason}`;
       state.flappingUntil = Math.max(state.flappingUntil, now + FLAP_HOLD_MS);
     }
     if (state.lastStatus === nextStatus) return null;
     state.lastStatus = nextStatus;
     state.lastStatusChangeAt = now;
     if (nextStatus === 'working') state.lastWorkingHeartbeatAt = now;
-    if (nextStatus === 'working' || nextStatus === 'idle') {
-      state.workingIdleTransitions.push({ status: nextStatus, at: now });
-      state.workingIdleTransitions = state.workingIdleTransitions.filter((entry) => now - entry.at <= FLAP_WINDOW_MS);
-    } else if (nextStatus === 'needs_input') {
-      state.workingIdleTransitions = [];
+    if (nextStatus === 'working' || nextStatus === 'needs_input') {
+      state.workingNeedsInputTransitions.push({ status: nextStatus, at: now });
+      state.workingNeedsInputTransitions = state.workingNeedsInputTransitions.filter((entry) => now - entry.at <= FLAP_WINDOW_MS);
     }
     const change: AgentStatusChange = {
       status: nextStatus,
@@ -445,12 +452,12 @@ export class OutputAnalyzer {
     return change;
   }
 
-  private isWorkingIdleFlapping(state: SessionState, proposed: AgentStatus, now: number): boolean {
-    if (proposed !== 'working' && proposed !== 'idle') return false;
-    if (state.lastStatus !== 'working' && state.lastStatus !== 'idle') return false;
+  private isWorkingNeedsInputFlapping(state: SessionState, proposed: AgentStatus, now: number): boolean {
+    if (proposed !== 'working' && proposed !== 'needs_input') return false;
+    if (state.lastStatus !== 'working' && state.lastStatus !== 'needs_input') return false;
     if (state.lastStatus === proposed) return false;
-    const recent = state.workingIdleTransitions.filter((entry) => now - entry.at <= FLAP_WINDOW_MS);
-    const series: Array<'working' | 'idle'> = [...recent.map((entry) => entry.status), proposed];
+    const recent = state.workingNeedsInputTransitions.filter((entry) => now - entry.at <= FLAP_WINDOW_MS);
+    const series: Array<'working' | 'needs_input'> = [...recent.map((entry) => entry.status), proposed];
     if (series.length < FLAP_MIN_TRANSITIONS) return false;
     let alternatingRun = 1;
     for (let i = series.length - 2; i >= 0; i--) {
@@ -498,7 +505,7 @@ export class OutputAnalyzer {
       lastTypingSignalAt: 0,
       terminalFocused: false,
       lastFocusSignalAt: 0,
-      workingIdleTransitions: [],
+      workingNeedsInputTransitions: [],
       flappingUntil: 0,
       hadChunkSinceTick: false,
       pendingChunks: [],

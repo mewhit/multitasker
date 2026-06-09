@@ -435,7 +435,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
 
 
   // Periodic sweep: demote sessions that have been silently parked in
-  // 'working' back to 'idle' after IDLE_TIMEOUT_MS of nothing happening.
+  // 'working' back to 'needs_input' after IDLE_TIMEOUT_MS of nothing happening.
   // Without this, the UI shows "running" forever for any session whose first
   // output didn't match a running indicator (typical for plain shells).
   //

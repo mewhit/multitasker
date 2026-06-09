@@ -56,7 +56,7 @@ export class MultitaskerClient {
 
   async sendAgentStatus(req: {
     shellSessionId: string;
-    status: 'working' | 'needs_input' | 'idle';
+    status: 'working' | 'needs_input';
     agentKind: string;
     reason?: string;
     matchedText?: string;

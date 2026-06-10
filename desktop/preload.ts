@@ -103,25 +103,6 @@ export interface SessionState {
   terminalPid?: number;
 }
 
-export interface SlackNotification {
-  id: string;
-  teamId?: string;
-  teamName?: string;
-  channelId?: string;
-  channelName?: string;
-  channelType?: string;
-  userId?: string;
-  userName?: string;
-  text: string;
-  ts?: string;
-  threadTs?: string;
-  permalink?: string;
-  receivedAt: number;
-  messageCount?: number;
-  priorityRank?: number;
-  priorityLabel?: string;
-}
-
 export interface ManualTask {
   id: string;
   text: string;
@@ -217,44 +198,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onRecurringTaskListUpdate: (cb: (tasks: RecurringTask[]) => void): void => {
     ipcRenderer.on('recurring-task:list-update', (_event, tasks: RecurringTask[]) => cb(tasks));
   },
-
-  getSlackNotifications: (): Promise<SlackNotification[]> =>
-    ipcRenderer.invoke('slack:list'),
-
-  clearSlackNotifications: (): Promise<void> =>
-    ipcRenderer.invoke('slack:clear'),
-
-  removeSlackNotification: (id: string): Promise<boolean> =>
-    ipcRenderer.invoke('slack:remove', id),
-
-  openSlackNotification: (id: string): Promise<boolean> =>
-    ipcRenderer.invoke('slack:open', id),
-
-  startSlackAuth: (): Promise<{ ok: boolean; message: string }> =>
-    ipcRenderer.invoke('slack:start-auth'),
-
-  startSlackListener: (): Promise<{ ok: boolean; message: string }> =>
-    ipcRenderer.invoke('slack:start-listener'),
-
-  getSlackListenerStatus: (): Promise<{ ok: boolean; message: string } | null> =>
-    ipcRenderer.invoke('slack:get-listener-status'),
-
-  onSlackNotification: (cb: (notification: SlackNotification) => void): void => {
-    ipcRenderer.on('slack:notification', (_event, notification: SlackNotification) => cb(notification));
-  },
-
-  onSlackListUpdate: (cb: (notifications: SlackNotification[]) => void): void => {
-    ipcRenderer.on('slack:list-update', (_event, notifications: SlackNotification[]) => cb(notifications));
-  },
-
-  onSlackAuthStatus: (cb: (payload: { ok: boolean; message: string }) => void): void => {
-    ipcRenderer.on('slack:auth-status', (_event, payload: { ok: boolean; message: string }) => cb(payload));
-  },
-
-  onSlackListenerStatus: (cb: (payload: { ok: boolean; message: string }) => void): void => {
-    ipcRenderer.on('slack:listener-status', (_event, payload: { ok: boolean; message: string }) => cb(payload));
-  },
-
   getGoogleCalendarEvents: (): Promise<GoogleCalendarEvent[]> =>
     ipcRenderer.invoke('google-calendar:list'),
 

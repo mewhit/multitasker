@@ -3,23 +3,30 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "concurrently -k -n tsc:desktop,electron -c blue,green \"tsc -w -p tsconfig.json\" \"node ..\\scripts\\dev-electron.js\"",
+    "build": "tsc -p tsconfig.json && vite build",
+    "dev": "concurrently -k -n tsc:desktop,vite,electron -c blue,cyan,green \"tsc -w -p tsconfig.json\" \"vite\" \"node ..\\scripts\\dev-electron.js\"",
     "start": "electron .."
   },
   "devDependencies": {
     "@types/node": "^25.7.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^9.2.1",
     "electron": "^42.0.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^8.0.16"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
-    "@slack/web-api": "^7.16.0",
+    "multitasker": "file:..",
     "node-window-manager": "^2.2.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "ws": "^8.21.0"
   }
 }

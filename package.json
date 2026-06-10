@@ -5,24 +5,38 @@
   "description": "Multitasker monorepo",
   "main": "dist/desktop/main.js",
   "scripts": {
-    "postinstall": "npm run install:apps",
     "install:apps": "npm install --prefix desktop && npm install --prefix http-server && npm install --prefix shell && npm install --prefix ws-server",
     "clean:debug-log": "node scripts\\clean-debug-log.js",
     "prebuild": "npm run clean:debug-log",
-    "build": "npm run build --prefix desktop && npm run build --prefix http-server && npm run build --prefix shell && npm run build --prefix ws-server",
+    "build": "npm run build:desktop && npm run build:http && npm run build:shell && npm run build:ws",
+    "build:desktop": "npm run build --prefix desktop",
+    "build:http": "npm run build --prefix http-server",
+    "build:shell": "npm run build --prefix shell",
+    "build:ws": "npm run build --prefix ws-server",
     "postbuild": "npm run clean:debug-log",
-    "server": "npm run start --prefix http-server",
-    "shell": "node scripts\\run-shell.js",
-    "shell:dev": "concurrently -k -n shell,ws-server -c yellow,magenta \"npm run dev --prefix shell\" \"npm run dev --prefix ws-server\"",
-    "apps:start": "npm run start",
-    "apps:dev": "npm run dev",
     "dev": "concurrently -k -n desktop,http-server,shell,ws-server -c green,blue,yellow,magenta \"npm run dev --prefix desktop\" \"npm run dev --prefix http-server\" \"npm run dev --prefix shell\" \"npm run dev --prefix ws-server\"",
-    "start": "npm run build && npm run start --prefix desktop"
+    "dev:desktop": "npm run dev --prefix desktop",
+    "dev:http": "npm run dev --prefix http-server",
+    "dev:shell": "npm run dev --prefix shell",
+    "dev:ws": "npm run dev --prefix ws-server",
+    "start": "concurrently -k -n desktop,http-server,shell,ws-server -c green,blue,yellow,magenta \"npm run start --prefix desktop\" \"npm run start --prefix http-server\" \"npm run start --prefix shell\" \"npm run start --prefix ws-server\"",
+    "start:electron": "npm run start --prefix desktop",
+    "start:http": "npm run start --prefix http-server",
+    "start:shell": "npm run start --prefix shell",
+    "start:ws": "npm run start --prefix ws-server",
+    "shell": "node scripts\\run-shell.js",
+    "shell:dev": "concurrently -k -n shell,ws-server -c yellow,magenta \"npm run dev --prefix shell\" \"npm run dev --prefix ws-server\""
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "concurrently": "^9.2.1"
+  },
+  "dependencies": {
+    "@xterm/headless": "^6.0.0",
+    "node-pty": "^1.2.0-beta.13",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.0"
   }
 }

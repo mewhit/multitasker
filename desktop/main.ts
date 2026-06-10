@@ -5,7 +5,6 @@ import { exec, spawn, type ChildProcessWithoutNullStreams } from 'node:child_pro
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer, request as httpRequest, type ClientRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { WebClient } from '@slack/web-api';
 import { SessionManager, type Session, type SessionStatus, type TerminalBinding, type TerminalUpdate } from './sessionManager';
 import { createShellPty as spawnShellPty, createShellSsh as spawnShellSsh } from './shellServerClient';
 import {
@@ -19,8 +18,7 @@ import {
   saveManualTasks,
   loadRecurringTasks,
   saveRecurringTasks,
-  loadSlackNotifications,
-  saveSlackNotifications,
+
   clearGoogleCalendarAuth,
   loadGoogleCalendarConnections,
   saveGoogleCalendarConnections,
@@ -54,12 +52,6 @@ const TERMINAL_UPDATE_HOST = '127.0.0.1';
 const TERMINAL_UPDATE_PORT = 39017;
 const TERMINAL_UPDATE_PATH = '/terminal-update';
 const TERMINAL_EVENT_PATH = '/terminal-event';
-const SLACK_EVENT_PATH = '/slack-event';
-const SLACK_NOTIFICATION_PATH = '/slack-notification';
-const SLACK_NOTIFICATION_DISMISS_PATH = '/slack-notification-dismiss';
-const EXTENSION_SLACK_EVENT_PATH = '/extensions/slack/events';
-const EXTENSION_SLACK_NOTIFICATION_PATH = '/extensions/slack/notifications';
-const EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH = '/extensions/slack/notification-dismiss';
 const BACKEND_EVENTS_PATH = '/api/events';
 const BACKEND_HEALTH_PATH = '/api/health';
 const BACKEND_STATE_PATH = '/api/state';
@@ -73,20 +65,10 @@ const MAX_MANUAL_TASKS = 200;
 const MAX_MANUAL_TASK_TEXT_LENGTH = 4000;
 const MAX_RECURRING_TASKS = 100;
 const RECURRING_TASK_CHECK_INTERVAL_MS = 30 * 1000;
-const MAX_SLACK_NOTIFICATIONS = 100;
-const MAX_SLACK_TEXT_LENGTH = 4000;
-const MAX_SLACK_DEBUG_TEXT_LENGTH = 700;
 const MAX_PENDING_TERMINAL_EVENTS_PER_SESSION = 200;
 const DEBUG_LOG_DIRECTORY = path.join('.tmp', 'desktop');
 const DEBUG_LOG_FILE_EXTENSION = '.log';
 const TERMINAL_UPDATE_DEBUG_ENV = 'MULTITASKER_DEBUG_TERMINAL';
-const SLACK_AUTH_DEBUG_LOG_FILE = 'slack-auth.log';
-const SLACK_SOCKET_DEBUG_LOG_FILE = 'slack-connector.log';
-const SLACK_OAUTH_SCRIPT_RELATIVE_PATH = path.join('extension', 'slack', 'src', 'slack-oauth.js');
-const SLACK_SOCKET_SCRIPT_RELATIVE_PATH = path.join('extension', 'slack', 'src', 'slack-socket.js');
-const SLACK_AUTH_OUTPUT_MAX_LENGTH = 4000;
-const SLACK_SOCKET_OUTPUT_MAX_LENGTH = 4000;
-const SLACK_USER_CONVERSATIONS_REFRESH_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_SCOPE = 'openid email profile https://www.googleapis.com/auth/calendar.readonly';
 const GOOGLE_CALENDAR_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
@@ -97,18 +79,11 @@ const GOOGLE_CALENDAR_AUTH_TIMEOUT_MS = 2 * 60 * 1000;
 const GOOGLE_CALENDAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
 const MAX_GOOGLE_CALENDAR_EVENTS = 100;
-const SLACK_PRIORITY_MENTION: SlackNotificationPriority = { rank: 0, label: 'mention' };
-const SLACK_PRIORITY_DM: SlackNotificationPriority = { rank: 1, label: 'dm' };
-const SLACK_PRIORITY_THREAD_MENTION: SlackNotificationPriority = { rank: 2, label: 'thread_mention' };
-const SLACK_PRIORITY_THREAD_WRITTEN: SlackNotificationPriority = { rank: 3, label: 'thread_written' };
-const SLACK_PRIORITY_OTHER: SlackNotificationPriority = { rank: 4, label: 'other' };
-const SLACK_AUTHORIZE_URL_PATTERN = /https:\/\/slack\.com\/oauth\/v2\/authorize\?\S+/;
 
 interface BackendState {
   sessions: Session[];
   manualTasks: ManualTaskState[];
   recurringTasks: RecurringTaskState[];
-  slackNotifications: SlackNotification[];
 }
 
 interface BackendStateResponse {
@@ -162,11 +137,6 @@ interface BackendRecurringTasksResponse {
 interface BackendRecurringTaskResponse {
   ok: boolean;
   task: RecurringTaskState | null;
-}
-
-interface BackendSlackNotificationsResponse {
-  ok: boolean;
-  slackNotifications: SlackNotification[];
 }
 
 interface GoogleCalendarStatus {
@@ -252,58 +222,6 @@ interface BackendBooleanResponse {
   removed?: boolean;
 }
 
-interface SlackNotification {
-  id: string;
-  teamId?: string;
-  teamName?: string;
-  channelId?: string;
-  channelName?: string;
-  channelType?: string;
-  userId?: string;
-  userName?: string;
-  text: string;
-  ts?: string;
-  threadTs?: string;
-  permalink?: string;
-  receivedAt: number;
-  messageCount?: number;
-  priorityRank?: number;
-  priorityLabel?: SlackNotificationPriorityLabel;
-}
-
-type SlackNotificationPriorityLabel = 'mention' | 'dm' | 'thread_mention' | 'thread_written' | 'other';
-
-interface SlackNotificationPriority {
-  rank: number;
-  label: SlackNotificationPriorityLabel;
-}
-
-interface SlackNotificationPriorityDecision extends SlackNotificationPriority {
-  reason: string;
-  mentionsAuthedUser: boolean;
-  directMessage: boolean;
-  threadReply: boolean;
-  threadWrittenByAuthedUser: boolean;
-  threadTs?: string;
-}
-
-interface SlackNotificationDismissRequest {
-  channelId: string;
-  teamId?: string;
-  channelType?: string;
-  reason?: string;
-  targetTs?: string;
-  replyTs?: string;
-  ts?: string;
-  receivedAt?: number;
-}
-
-interface SlackChannelInfo {
-  name: string;
-  isUserMember: boolean;
-  type: string;
-}
-
 let mainWindow: BrowserWindow | null = null;
 let sessionManager: SessionManager | null = null;
 let terminalUpdateServer: Server | null = null;
@@ -322,32 +240,12 @@ const terminalDebugLogFileBySessionId = new Map<string, string>();
 const reportedDebugLogWriteFailures = new Set<string>();
 const manualTasks: ManualTaskState[] = [];
 const recurringTasks: RecurringTaskState[] = [];
-const slackNotifications: SlackNotification[] = [];
 const googleCalendarEvents: GoogleCalendarEventState[] = [];
 const backendState: BackendState = {
   sessions: [],
   manualTasks,
   recurringTasks,
-  slackNotifications,
 };
-const slackUserNameById = new Map<string, string>();
-const slackBotNameById = new Map<string, string>();
-const slackChannelInfoById = new Map<string, SlackChannelInfo>();
-const slackClientByToken = new Map<string, WebClient>();
-const slackThreadWrittenByAuthedUser = new Map<string, boolean>();
-let slackAuthProcess: ChildProcessWithoutNullStreams | null = null;
-let slackAuthOutput = '';
-let slackAuthAuthorizeUrl = '';
-let slackAuthBrowserOpenRequested = false;
-let slackSocketProcess: ChildProcessWithoutNullStreams | null = null;
-let slackSocketOutput = '';
-let slackSocketConnected = false;
-let slackSocketLastError = '';
-let slackListenerStatus: { ok: boolean; message: string } | null = null;
-let slackApiEnv: Record<string, string> = {};
-let slackAuthedUserId = '';
-let slackAuthedUserConversationIds: Set<string> | undefined;
-let slackAuthedUserConversationsLoadedAt = 0;
 let recurringTaskTimer: ReturnType<typeof setInterval> | null = null;
 let googleCalendarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let googleCalendarAuthServer: Server | null = null;
@@ -472,273 +370,6 @@ function buildTerminalBinding(binding: {
   const terminalCaptureReason = binding.terminalCaptureReason?.trim();
   if (terminalCaptureReason) terminalBinding.terminalCaptureReason = terminalCaptureReason;
   return terminalBinding;
-}
-
-function startSlackAuthFlow(): { ok: boolean; message: string } {
-  if (slackAuthProcess && slackAuthProcess.exitCode === null && !slackAuthProcess.killed) {
-    if (slackAuthAuthorizeUrl) {
-      openSlackAuthorizeUrl(slackAuthAuthorizeUrl, true);
-    }
-    return { ok: true, message: 'Slack authorization is already running.' };
-  }
-
-  const scriptPath = getSlackScriptPath(SLACK_OAUTH_SCRIPT_RELATIVE_PATH);
-  if (!scriptPath) {
-    return { ok: false, message: 'Slack OAuth script was not found under extension\\slack.' };
-  }
-
-  const electronRunAsNode = process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {};
-  slackAuthOutput = '';
-  slackAuthAuthorizeUrl = '';
-  slackAuthBrowserOpenRequested = false;
-  const child = spawn(process.execPath, [scriptPath], {
-    cwd: path.dirname(path.dirname(scriptPath)),
-    env: {
-      ...process.env,
-      ...electronRunAsNode,
-      SLACK_OAUTH_OPEN_BROWSER: '0',
-    },
-    windowsHide: true,
-  });
-  slackAuthProcess = child;
-
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk: string) => {
-    handleSlackAuthStdout(chunk);
-  });
-
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk: string) => {
-    appendSlackAuthOutput(chunk);
-  });
-
-  child.on('error', error => {
-    if (slackAuthProcess === child) slackAuthProcess = null;
-    notifySlackAuthStatus(false, `Slack authorization could not start: ${getErrorMessage(error)}`);
-  });
-
-  child.on('exit', code => {
-    if (slackAuthProcess === child) slackAuthProcess = null;
-    if (code === 0) {
-      notifySlackAuthStatus(true, 'Slack authorization completed.');
-      restartSlackSocketListener({ notifyIfMissingConfig: true });
-      return;
-    }
-
-    const details = slackAuthOutput.trim();
-    notifySlackAuthStatus(false, details || `Slack authorization exited with code ${code ?? 'unknown'}.`);
-  });
-
-  notifySlackAuthStatus(true, 'Slack authorization started. Complete the flow in your browser.');
-  return { ok: true, message: 'Slack authorization started. Complete the flow in your browser.' };
-}
-
-function startSlackSocketListener(options: { notifyIfMissingConfig: boolean }): { ok: boolean; message: string } {
-  if (slackSocketProcess && slackSocketProcess.exitCode === null && !slackSocketProcess.killed) {
-    return {
-      ok: true,
-      message: slackSocketConnected ? 'Slack listener is already connected.' : 'Slack listener is already starting.',
-    };
-  }
-
-  const scriptPath = getSlackScriptPath(SLACK_SOCKET_SCRIPT_RELATIVE_PATH);
-  if (!scriptPath) {
-    const message = 'Slack Socket Mode script was not found under extension\\slack.';
-    if (options.notifyIfMissingConfig) notifySlackListenerStatus(false, message);
-    return { ok: false, message };
-  }
-
-  const slackEnv = readSlackEnvForScript(scriptPath);
-  resetSlackApiState(slackEnv);
-
-  const appToken = getSlackApiEnvValue('SLACK_APP_TOKEN');
-  if (!appToken.trim()) {
-    const message = 'Slack OAuth completed, but the listener needs SLACK_APP_TOKEN=xapp-... in extension\\slack\\.env.';
-    if (options.notifyIfMissingConfig) notifySlackListenerStatus(false, message);
-    return { ok: false, message };
-  }
-  if (isSlackOnlyUserChannelsEnabled() && !getSlackUserToken()) {
-    const message = 'Slack listener needs SLACK_USER_TOKEN=xoxp-... when SLACK_ONLY_USER_CHANNELS is enabled.';
-    if (options.notifyIfMissingConfig) notifySlackListenerStatus(false, message);
-    return { ok: false, message };
-  }
-
-  const electronRunAsNode = process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {};
-  slackSocketOutput = '';
-  slackSocketConnected = false;
-  slackSocketLastError = '';
-  const child = spawn(process.execPath, [scriptPath], {
-    cwd: path.dirname(path.dirname(scriptPath)),
-    env: {
-      ...process.env,
-      ...slackEnv,
-      ...electronRunAsNode,
-    },
-    windowsHide: true,
-  });
-  slackSocketProcess = child;
-
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk: string) => {
-    handleSlackSocketOutput(chunk);
-  });
-
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk: string) => {
-    handleSlackSocketOutput(chunk);
-  });
-
-  child.on('error', error => {
-    if (slackSocketProcess !== child) return;
-    if (slackSocketProcess === child) slackSocketProcess = null;
-    slackSocketConnected = false;
-    notifySlackListenerStatus(false, `Slack listener could not start: ${getErrorMessage(error)}`);
-  });
-
-  child.on('exit', code => {
-    if (slackSocketProcess !== child) return;
-    slackSocketProcess = null;
-    slackSocketConnected = false;
-
-    const details = slackSocketOutput.trim();
-    const stoppedCleanly = code === 0 || code === null;
-    notifySlackListenerStatus(
-      stoppedCleanly,
-      stoppedCleanly
-        ? 'Slack listener stopped.'
-        : details || `Slack listener exited with code ${code}.`
-    );
-  });
-
-  notifySlackListenerStatus(true, 'Slack listener starting.');
-  return { ok: true, message: 'Slack listener starting.' };
-}
-
-function restartSlackSocketListener(options: { notifyIfMissingConfig: boolean }): { ok: boolean; message: string } {
-  stopSlackSocketListener();
-  return startSlackSocketListener(options);
-}
-
-function getSlackScriptPath(relativePath: string): string | null {
-  const candidates = [
-    path.join(app.getAppPath(), relativePath),
-    path.join(process.cwd(), relativePath),
-    path.join(__dirname, '..', relativePath),
-    path.join(__dirname, '..', '..', relativePath),
-  ];
-  return candidates.find(candidate => fs.existsSync(candidate)) ?? null;
-}
-
-function appendSlackAuthOutput(chunk: string): void {
-  appendDebugLogFile(SLACK_AUTH_DEBUG_LOG_FILE, chunk);
-  slackAuthOutput = `${slackAuthOutput}${chunk}`;
-  if (slackAuthOutput.length > SLACK_AUTH_OUTPUT_MAX_LENGTH) {
-    slackAuthOutput = slackAuthOutput.slice(-SLACK_AUTH_OUTPUT_MAX_LENGTH);
-  }
-}
-
-function handleSlackAuthStdout(chunk: string): void {
-  appendSlackAuthOutput(chunk);
-  const authorizeUrl = slackAuthOutput.match(SLACK_AUTHORIZE_URL_PATTERN)?.[0];
-  if (!authorizeUrl) return;
-
-  slackAuthAuthorizeUrl = authorizeUrl;
-  openSlackAuthorizeUrl(authorizeUrl);
-}
-
-function openSlackAuthorizeUrl(authorizeUrl: string, force = false): void {
-  if (slackAuthBrowserOpenRequested && !force) return;
-
-  slackAuthBrowserOpenRequested = true;
-  void shell.openExternal(authorizeUrl)
-    .then(() => {
-      notifySlackAuthStatus(true, 'Slack authorization opened in your browser.');
-    })
-    .catch(error => {
-      slackAuthBrowserOpenRequested = false;
-      notifySlackAuthStatus(false, `Could not open Slack authorization in the browser: ${getErrorMessage(error)}`);
-    });
-}
-
-function handleSlackSocketOutput(chunk: string): void {
-  appendSlackSocketOutput(chunk);
-  const failureMatch = slackSocketOutput.match(/Slack connector failed: ([^\r\n]+)/);
-  if (!slackSocketConnected && failureMatch?.[1] && failureMatch[1] !== slackSocketLastError) {
-    slackSocketLastError = failureMatch[1];
-    notifySlackListenerStatus(false, `Slack listener error: ${failureMatch[1]}`);
-  }
-  if (!slackSocketConnected && slackSocketOutput.includes('Connected to Slack Socket Mode.')) {
-    slackSocketConnected = true;
-    notifySlackListenerStatus(true, 'Slack listener connected.');
-  }
-}
-
-function appendSlackSocketOutput(chunk: string): void {
-  appendDebugLogFile(SLACK_SOCKET_DEBUG_LOG_FILE, chunk);
-  slackSocketOutput = `${slackSocketOutput}${chunk}`;
-  if (slackSocketOutput.length > SLACK_SOCKET_OUTPUT_MAX_LENGTH) {
-    slackSocketOutput = slackSocketOutput.slice(-SLACK_SOCKET_OUTPUT_MAX_LENGTH);
-  }
-}
-
-function notifySlackAuthStatus(ok: boolean, message: string): void {
-  mainWindow?.webContents.send('slack:auth-status', { ok, message });
-}
-
-function notifySlackListenerStatus(ok: boolean, message: string): void {
-  slackListenerStatus = { ok, message };
-  mainWindow?.webContents.send('slack:listener-status', { ok, message });
-}
-
-function stopSlackAuthFlow(): void {
-  const child = slackAuthProcess;
-  if (!child) return;
-
-  slackAuthProcess = null;
-  if (child.exitCode === null && !child.killed) {
-    child.kill();
-  }
-}
-
-function stopSlackSocketListener(): void {
-  const child = slackSocketProcess;
-  if (!child) return;
-
-  slackSocketProcess = null;
-  slackSocketConnected = false;
-  if (child.exitCode === null && !child.killed) {
-    child.kill();
-  }
-}
-
-function readSlackEnvForScript(scriptPath: string): Record<string, string> {
-  const envPath = path.join(path.dirname(path.dirname(scriptPath)), '.env');
-  if (!fs.existsSync(envPath)) return {};
-
-  const env: Record<string, string> = {};
-  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    if (!trimmedLine || trimmedLine.startsWith('#')) continue;
-
-    const equalsIndex = trimmedLine.indexOf('=');
-    if (equalsIndex <= 0) continue;
-
-    const key = trimmedLine.slice(0, equalsIndex).trim();
-    const value = unquoteSlackEnvValue(trimmedLine.slice(equalsIndex + 1).trim());
-    if (key) env[key] = value;
-  }
-  return env;
-}
-
-function unquoteSlackEnvValue(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -984,24 +615,6 @@ function handleBackendEvent(eventName: string, payload: unknown): void {
     case 'recurring-task:list-update':
       if (shouldBackendOwnState() && Array.isArray(payload)) applyBackendRecurringTasks(payload as RecurringTaskState[]);
       return;
-    case 'slack:notification':
-      if (isSlackNotification(payload)) {
-        if (shouldBackendOwnState()) {
-          mainWindow?.webContents.send('slack:notification', payload);
-        } else {
-          handleSlackNotification(payload);
-        }
-        if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true);
-      }
-      return;
-    case 'slack:dismiss': {
-      const dismissRequest = parseSlackNotificationDismissRequest(payload);
-      if (dismissRequest) handleSlackNotificationDismiss(dismissRequest);
-      return;
-    }
-    case 'slack:list-update':
-      if (shouldBackendOwnState() && Array.isArray(payload)) applyBackendSlackNotifications(payload as SlackNotification[]);
-      return;
     default:
       return;
   }
@@ -1012,16 +625,7 @@ function isBackendState(value: unknown): value is BackendState {
   const candidate = value as Partial<BackendState>;
   return Array.isArray(candidate.sessions) &&
     Array.isArray(candidate.manualTasks) &&
-    Array.isArray(candidate.recurringTasks) &&
-    Array.isArray(candidate.slackNotifications);
-}
-
-function isSlackNotification(value: unknown): value is SlackNotification {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<SlackNotification>;
-  return typeof candidate.id === 'string' &&
-    typeof candidate.text === 'string' &&
-    typeof candidate.receivedAt === 'number';
+    Array.isArray(candidate.recurringTasks);
 }
 
 function applyBackendState(state: BackendState): void {
@@ -1029,7 +633,6 @@ function applyBackendState(state: BackendState): void {
     applyBackendSessions(state.sessions);
     applyBackendManualTasks(state.manualTasks);
     applyBackendRecurringTasks(state.recurringTasks);
-    applyBackendSlackNotifications(state.slackNotifications);
   }
 }
 
@@ -1048,12 +651,6 @@ function applyBackendRecurringTasks(tasks: RecurringTaskState[]): void {
   recurringTasks.length = 0;
   recurringTasks.push(...tasks.map(cloneRecurringTask));
   mainWindow?.webContents.send('recurring-task:list-update', recurringTasks.map(cloneRecurringTask));
-}
-
-function applyBackendSlackNotifications(notifications: SlackNotification[]): void {
-  slackNotifications.length = 0;
-  slackNotifications.push(...notifications.map(notification => ({ ...notification })));
-  mainWindow?.webContents.send('slack:list-update', slackNotifications.map(notification => ({ ...notification })));
 }
 
 function isTerminalUpdateDebugEnabled(): boolean {
@@ -1084,22 +681,6 @@ function appendTerminalDebugLog(line: string, details: Record<string, unknown>):
     fs.appendFileSync(filePath, `${line}\n`, 'utf8');
   } catch (error) {
     reportDebugLogWriteFailure(`Could not write Electron terminal debug log "${filePath}": ${getErrorMessage(error)}`);
-  }
-}
-
-function appendDebugLogFile(fileName: string, chunk: string): void {
-  const lines = chunk.replace(/\r/g, '').split('\n').filter(line => line.length > 0);
-  if (lines.length === 0) return;
-
-  const filePath = path.join(process.cwd(), DEBUG_LOG_DIRECTORY, fileName);
-  const content = lines
-    .map(line => `[multitasker slack ${new Date().toISOString()}] ${line}`)
-    .join('\n');
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.appendFileSync(filePath, `${content}\n`, 'utf8');
-  } catch (error) {
-    reportDebugLogWriteFailure(`Could not write Slack debug log "${filePath}": ${getErrorMessage(error)}`);
   }
 }
 
@@ -1445,7 +1026,7 @@ function broadcastManualTasks(): void {
 
 function truncateManualTaskText(text: string): string {
   if (text.length <= MAX_MANUAL_TASK_TEXT_LENGTH) return text;
-  return `${text.slice(0, MAX_MANUAL_TASK_TEXT_LENGTH - 1)}…`;
+  return `${text.slice(0, MAX_MANUAL_TASK_TEXT_LENGTH - 1)}â€¦`;
 }
 
 function createRecurringTask(textValue: unknown, timeValue: unknown, scheduleValue: unknown): RecurringTaskState | null {
@@ -2452,1066 +2033,6 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function parseSlackNotificationRequest(payload: unknown): SlackNotification | null {
-  if (typeof payload !== 'object' || payload === null) return null;
-  const record = payload as Record<string, unknown>;
-
-  const id = readStringField(record, 'id').trim();
-  const receivedAt = readOptionalNumberField(record, 'receivedAt') ?? Date.now();
-  if (!id || !Number.isFinite(receivedAt)) return null;
-
-  const text = truncateSlackText(readStringField(record, 'text').trim() || '(no text)');
-  const notification: SlackNotification = {
-    id,
-    text,
-    receivedAt,
-  };
-
-  addOptionalSlackString(notification, 'teamId', readStringField(record, 'teamId'));
-  addOptionalSlackString(notification, 'teamName', readStringField(record, 'teamName'));
-  addOptionalSlackString(notification, 'channelId', readStringField(record, 'channelId'));
-  addOptionalSlackString(notification, 'channelName', readStringField(record, 'channelName'));
-  addOptionalSlackString(notification, 'channelType', readStringField(record, 'channelType'));
-  addOptionalSlackString(notification, 'userId', readStringField(record, 'userId'));
-  addOptionalSlackString(notification, 'userName', readStringField(record, 'userName'));
-  addOptionalSlackString(notification, 'ts', readStringField(record, 'ts'));
-  addOptionalSlackString(notification, 'threadTs', readStringField(record, 'threadTs'));
-  addOptionalSlackString(notification, 'permalink', readStringField(record, 'permalink'));
-  const messageCount = readOptionalNumberField(record, 'messageCount');
-  if (messageCount !== undefined && messageCount > 1) notification.messageCount = Math.floor(messageCount);
-  const priorityRank = readOptionalNumberField(record, 'priorityRank');
-  if (priorityRank !== undefined) notification.priorityRank = normalizeSlackPriorityRank(priorityRank);
-  const priorityLabel = readStringField(record, 'priorityLabel').trim();
-  if (isSlackNotificationPriorityLabel(priorityLabel)) notification.priorityLabel = priorityLabel;
-  return notification;
-}
-
-function parseSlackNotificationDismissRequest(payload: unknown): SlackNotificationDismissRequest | null {
-  if (typeof payload !== 'object' || payload === null) return null;
-  const record = payload as Record<string, unknown>;
-
-  const channelId = readStringField(record, 'channelId').trim();
-  if (!channelId) return null;
-
-  const request: SlackNotificationDismissRequest = { channelId };
-  const teamId = readStringField(record, 'teamId').trim();
-  if (teamId) request.teamId = teamId;
-
-  const channelType = readStringField(record, 'channelType').trim();
-  if (channelType) request.channelType = channelType;
-
-  const reason = readStringField(record, 'reason').trim();
-  if (reason) request.reason = reason;
-
-  const targetTs = readStringField(record, 'targetTs').trim();
-  if (targetTs) request.targetTs = targetTs;
-
-  const replyTs = readStringField(record, 'replyTs').trim();
-  if (replyTs) request.replyTs = replyTs;
-
-  const ts = readStringField(record, 'ts').trim();
-  if (ts) request.ts = ts;
-
-  const receivedAt = readOptionalNumberField(record, 'receivedAt');
-  if (receivedAt !== undefined) request.receivedAt = receivedAt;
-
-  return request;
-}
-
-function addOptionalSlackString(
-  notification: SlackNotification,
-  key: Exclude<keyof SlackNotification, 'id' | 'text' | 'receivedAt' | 'messageCount' | 'priorityRank' | 'priorityLabel'>,
-  value: string
-): void {
-  const trimmedValue = value.trim();
-  if (trimmedValue) notification[key] = trimmedValue;
-}
-
-function truncateSlackText(text: string): string {
-  if (text.length <= MAX_SLACK_TEXT_LENGTH) return text;
-  return `${text.slice(0, MAX_SLACK_TEXT_LENGTH - 1)}…`;
-}
-
-function getSlackDebugTextPreview(text: string): string {
-  const preview = text.replace(/\s+/g, ' ').trim();
-  if (preview.length <= MAX_SLACK_DEBUG_TEXT_LENGTH) return preview;
-  return `${preview.slice(0, MAX_SLACK_DEBUG_TEXT_LENGTH - 1)}…`;
-}
-
-function normalizeSlackPriorityRank(value: number): number {
-  if (!Number.isFinite(value)) return SLACK_PRIORITY_OTHER.rank;
-  return Math.max(SLACK_PRIORITY_MENTION.rank, Math.min(SLACK_PRIORITY_OTHER.rank, Math.floor(value)));
-}
-
-function isSlackNotificationPriorityLabel(value: string): value is SlackNotificationPriorityLabel {
-  return value === 'mention' ||
-    value === 'dm' ||
-    value === 'thread_mention' ||
-    value === 'thread_written' ||
-    value === 'other';
-}
-
-async function handleSlackEventEnvelope(envelope: unknown): Promise<void> {
-  const envelopeRecord = readSlackRecord(envelope);
-  if (!envelopeRecord) {
-    debugSlackEventDecision('ignored_invalid_envelope', {});
-    return;
-  }
-
-  const envelopeType = readSlackString(envelopeRecord, 'type');
-  if (envelopeType !== 'events_api') {
-    debugSlackEventDecision('ignored_non_event', { type: envelopeType });
-    return;
-  }
-
-  const payload = readSlackRecord(envelopeRecord, 'payload');
-  const event = payload ? readSlackRecord(payload, 'event') : undefined;
-  const envelopeId = readSlackString(envelopeRecord, 'envelope_id');
-  if (!payload || !event) {
-    debugSlackEventDecision('ignored_invalid_event', { envelopeId });
-    return;
-  }
-
-  const channelId = readSlackString(event, 'channel');
-  const ts = readSlackString(event, 'ts') || readSlackString(event, 'event_ts');
-  const eventText = readSlackString(event, 'text') || readSlackString(event, 'fallback');
-  if (readSlackBoolean(event, 'hidden') === true) {
-    debugSlackEventDecision('ignored_hidden', { envelopeId, channelId, messageText: getSlackDebugTextPreview(eventText), ts });
-    return;
-  }
-
-  const subtype = readSlackString(event, 'subtype');
-  if (subtype === 'message_deleted' || subtype === 'message_changed') {
-    debugSlackEventDecision('ignored_subtype', { envelopeId, channelId, subtype, messageText: getSlackDebugTextPreview(eventText), ts });
-    return;
-  }
-
-  const notification = await buildSlackNotification(payload, event, subtype);
-  if (notification) handleSlackNotification(notification);
-}
-
-async function buildSlackNotification(
-  payload: Record<string, unknown>,
-  event: Record<string, unknown>,
-  subtype: string
-): Promise<SlackNotification | null> {
-  const teamId = readSlackString(payload, 'team_id') || readSlackString(readSlackRecord(payload, 'team'), 'id');
-  const channelId = readSlackString(event, 'channel');
-  const eventUserId = readSlackString(event, 'user');
-  const botId = readSlackString(event, 'bot_id');
-  const senderId = eventUserId || botId;
-  const ts = readSlackString(event, 'ts') || readSlackString(event, 'event_ts');
-  const text = readSlackString(event, 'text') || readSlackString(event, 'fallback') || '(no text)';
-  if (!channelId && !text.trim()) return null;
-
-  await initializeSlackAuthedUserId();
-  rememberSlackAuthedUserThread(event);
-  if (eventUserId && slackAuthedUserId && eventUserId === slackAuthedUserId) {
-    const channelType = readSlackString(event, 'channel_type') || getSlackFallbackChannelType(channelId);
-    if (isSlackDirectMessageChannel(channelId, channelType)) {
-      const dismissRequest = buildSlackDismissRequest(payload, event, channelType);
-      const removed = handleSlackNotificationDismiss(dismissRequest);
-      debugSlackEventDecision('dismissed_self_dm', {
-        channelId,
-        channelType,
-        eventUserId,
-        authedUserId: slackAuthedUserId,
-        messageText: getSlackDebugTextPreview(text),
-        targetTs: dismissRequest.targetTs,
-        replyTs: dismissRequest.replyTs,
-        removed,
-        ts,
-      });
-      return null;
-    }
-
-    debugSlackEventDecision('ignored_self', {
-      channelId,
-      channelType,
-      eventUserId,
-      authedUserId: slackAuthedUserId,
-      messageText: getSlackDebugTextPreview(text),
-      ts,
-    });
-    return null;
-  }
-
-  const channelInfo = channelId ? await getSlackChannelInfo(channelId) : undefined;
-  if (channelId && !(await shouldAcceptSlackChannel(channelId, channelInfo))) {
-    debugSlackEventDecision('ignored_not_member', {
-      channelId,
-      channelType: channelInfo?.type || getSlackFallbackChannelType(channelId),
-      eventUserId,
-      authedUserId: slackAuthedUserId,
-      knownUserConversation: Boolean(slackAuthedUserConversationIds?.has(channelId)),
-      messageText: getSlackDebugTextPreview(text),
-      ts,
-    });
-    return null;
-  }
-
-  const userName = await getSlackMessageSenderName(event, eventUserId, botId);
-  const channelName = getSlackNotificationChannelName(channelInfo, channelId, userName);
-  const channelType = readSlackString(event, 'channel_type') || channelInfo?.type || '';
-  const priority = await getSlackNotificationPriority(channelId, event, channelType, ts);
-  const displayText = await resolveSlackMessageMentions(text);
-  const permalink = channelId && ts ? await getSlackPermalink(channelId, ts) : '';
-  const notification: SlackNotification = {
-    id: ['slack', teamId, channelId, ts || Date.now().toString()].filter(Boolean).join(':'),
-    text: truncateSlackText(displayText),
-    receivedAt: Date.now(),
-    priorityRank: priority.rank,
-    priorityLabel: priority.label,
-  };
-
-  addOptionalSlackString(notification, 'teamId', teamId);
-  addOptionalSlackString(notification, 'channelId', channelId);
-  addOptionalSlackString(notification, 'channelName', channelName);
-  addOptionalSlackString(notification, 'channelType', channelType);
-  addOptionalSlackString(notification, 'userId', senderId);
-  addOptionalSlackString(notification, 'userName', userName);
-  addOptionalSlackString(notification, 'ts', ts);
-  addOptionalSlackString(notification, 'threadTs', readSlackString(event, 'thread_ts'));
-  addOptionalSlackString(notification, 'permalink', permalink);
-
-  debugSlackEventDecision('accepted', {
-    channelId,
-    channelName,
-    channelType: notification.channelType,
-    subtype,
-    eventUserId,
-    userName,
-    messageText: getSlackDebugTextPreview(displayText),
-    rawMessageText: displayText !== text ? getSlackDebugTextPreview(text) : '',
-    priority: priority.label,
-    priorityRank: priority.rank,
-    priorityReason: priority.reason,
-    mentionsAuthedUser: priority.mentionsAuthedUser,
-    directMessage: priority.directMessage,
-    threadReply: priority.threadReply,
-    threadWrittenByAuthedUser: priority.threadWrittenByAuthedUser,
-    threadTs: priority.threadTs,
-    authedUserId: slackAuthedUserId,
-    knownUserConversation: channelId ? Boolean(slackAuthedUserConversationIds?.has(channelId)) : false,
-    ts,
-  });
-  return notification;
-}
-
-async function getSlackNotificationPriority(
-  channelId: string,
-  event: Record<string, unknown>,
-  channelType: string,
-  ts: string
-): Promise<SlackNotificationPriorityDecision> {
-  const threadTs = readSlackString(event, 'thread_ts');
-  const isThreadReply = Boolean(threadTs && threadTs !== ts);
-  const mentionsAuthedUser = slackAuthedUserId ? slackEventMentionsUser(event, slackAuthedUserId) : false;
-  const directMessage = isSlackDirectMessageChannel(channelId, channelType);
-  const threadWrittenByAuthedUser = isThreadReply
-    ? await isSlackThreadWrittenByAuthedUser(channelId, threadTs, event)
-    : false;
-  const details = {
-    mentionsAuthedUser,
-    directMessage,
-    threadReply: isThreadReply,
-    threadWrittenByAuthedUser,
-    ...(threadTs ? { threadTs } : {}),
-  };
-
-  if (mentionsAuthedUser && !isThreadReply) {
-    return { ...SLACK_PRIORITY_MENTION, ...details, reason: 'message mentions authed user' };
-  }
-  if (directMessage) {
-    return { ...SLACK_PRIORITY_DM, ...details, reason: 'direct message channel' };
-  }
-  if (mentionsAuthedUser && isThreadReply) {
-    return { ...SLACK_PRIORITY_THREAD_MENTION, ...details, reason: 'thread reply mentions authed user' };
-  }
-  if (threadWrittenByAuthedUser) {
-    return { ...SLACK_PRIORITY_THREAD_WRITTEN, ...details, reason: 'authed user participated in thread' };
-  }
-  return { ...SLACK_PRIORITY_OTHER, ...details, reason: 'no priority signal matched' };
-}
-
-function slackEventMentionsUser(event: Record<string, unknown>, userId: string): boolean {
-  const mentionToken = `<@${userId}>`;
-  return readSlackString(event, 'text').includes(mentionToken) ||
-    readSlackString(event, 'fallback').includes(mentionToken) ||
-    slackStructuredValueMentionsUser(event['blocks'], userId, mentionToken);
-}
-
-function slackStructuredValueMentionsUser(value: unknown, userId: string, mentionToken: string): boolean {
-  if (typeof value === 'string') return value.includes(mentionToken);
-  if (Array.isArray(value)) return value.some(item => slackStructuredValueMentionsUser(item, userId, mentionToken));
-
-  const record = readSlackRecord(value);
-  if (!record) return false;
-  const type = readSlackString(record, 'type');
-  if (type === 'user' && (readSlackString(record, 'user_id') === userId || readSlackString(record, 'user') === userId)) {
-    return true;
-  }
-
-  return Object.entries(record).some(([key, nestedValue]) => {
-    if (key === 'text' && typeof nestedValue === 'string') return nestedValue.includes(mentionToken);
-    if (typeof nestedValue === 'object' && nestedValue !== null) return slackStructuredValueMentionsUser(nestedValue, userId, mentionToken);
-    return typeof nestedValue === 'string' && nestedValue.includes(mentionToken);
-  });
-}
-
-function rememberSlackAuthedUserThread(event: Record<string, unknown>): void {
-  const eventUserId = readSlackString(event, 'user');
-  if (!slackAuthedUserId || eventUserId !== slackAuthedUserId) return;
-
-  const channelId = readSlackString(event, 'channel');
-  const ts = readSlackString(event, 'ts') || readSlackString(event, 'event_ts');
-  const threadTs = readSlackString(event, 'thread_ts') || ts;
-  if (!channelId || !threadTs) return;
-
-  slackThreadWrittenByAuthedUser.set(getSlackThreadKey(channelId, threadTs), true);
-}
-
-async function isSlackThreadWrittenByAuthedUser(
-  channelId: string,
-  threadTs: string,
-  event: Record<string, unknown>
-): Promise<boolean> {
-  if (!channelId || !threadTs || !slackAuthedUserId) return false;
-
-  const cacheKey = getSlackThreadKey(channelId, threadTs);
-  const cached = slackThreadWrittenByAuthedUser.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  if (readSlackString(event, 'parent_user_id') === slackAuthedUserId) {
-    slackThreadWrittenByAuthedUser.set(cacheKey, true);
-    return true;
-  }
-
-  if (!getSlackWebApiToken()) return false;
-
-  try {
-    const response = await slackApiWithFallback('conversations.replies', [getSlackUserToken(), getSlackBotToken()], {
-      channel: channelId,
-      ts: threadTs,
-      limit: 200,
-    });
-    const messages = Array.isArray(response['messages']) ? response['messages'] : [];
-    const wroteThread = messages.some(message => {
-      const messageRecord = readSlackRecord(message);
-      return readSlackString(messageRecord, 'user') === slackAuthedUserId;
-    });
-    slackThreadWrittenByAuthedUser.set(cacheKey, wroteThread);
-    return wroteThread;
-  } catch (error) {
-    debugSlackLog('Could not inspect Slack thread participation', {
-      channelId,
-      threadTs,
-      error: getErrorMessage(error),
-    });
-    return false;
-  }
-}
-
-function getSlackThreadKey(channelId: string, threadTs: string): string {
-  return `${channelId}:${threadTs}`;
-}
-
-function buildSlackDismissRequest(
-  payload: Record<string, unknown>,
-  event: Record<string, unknown>,
-  channelType: string
-): SlackNotificationDismissRequest {
-  const ts = readSlackString(event, 'ts') || readSlackString(event, 'event_ts');
-  const threadTs = readSlackString(event, 'thread_ts');
-  const targetTs = threadTs && threadTs !== ts ? threadTs : '';
-  const request: SlackNotificationDismissRequest = {
-    channelId: readSlackString(event, 'channel'),
-  };
-
-  const teamId = readSlackString(payload, 'team_id') || readSlackString(readSlackRecord(payload, 'team'), 'id');
-  if (teamId) request.teamId = teamId;
-  if (channelType) request.channelType = channelType;
-  if (targetTs) request.targetTs = targetTs;
-  if (ts) {
-    request.replyTs = ts;
-    request.ts = ts;
-  }
-  request.reason = 'self_dm_reply';
-  request.receivedAt = Date.now();
-  return request;
-}
-
-async function shouldAcceptSlackChannel(channelId: string, channelInfo: SlackChannelInfo | undefined): Promise<boolean> {
-  if (!isSlackOnlyUserChannelsEnabled()) return true;
-
-  const channelType = channelInfo?.type || getSlackFallbackChannelType(channelId);
-  if (channelType === 'im' || channelType === 'mpim') return true;
-  if (channelInfo?.isUserMember === true) return true;
-  if (await isSlackAuthedUserConversation(channelId)) return true;
-  return false;
-}
-
-async function isSlackAuthedUserConversation(channelId: string): Promise<boolean> {
-  if (!isSlackOnlyUserChannelsEnabled()) return true;
-  const userToken = getSlackUserToken();
-  if (!userToken) return false;
-
-  await initializeSlackAuthedUserId();
-  if (!slackAuthedUserId) return false;
-
-  const stale = Date.now() - slackAuthedUserConversationsLoadedAt > SLACK_USER_CONVERSATIONS_REFRESH_MS;
-  if (!slackAuthedUserConversationIds || stale) {
-    try {
-      await refreshSlackAuthedUserConversations();
-    } catch (error) {
-      debugSlackLog('Could not refresh Slack user conversations', { error: getErrorMessage(error) });
-      return false;
-    }
-  }
-  return Boolean(slackAuthedUserConversationIds?.has(channelId));
-}
-
-async function refreshSlackAuthedUserConversations(): Promise<void> {
-  if (!isSlackOnlyUserChannelsEnabled()) return;
-  const userToken = getSlackUserToken();
-  if (!userToken || !slackAuthedUserId) return;
-
-  const conversationIds = new Set<string>();
-  let cursor = '';
-  do {
-    const payload: Record<string, unknown> = {
-      user: slackAuthedUserId,
-      types: 'public_channel,private_channel,mpim,im',
-      exclude_archived: true,
-      limit: 1000,
-    };
-    if (cursor) payload['cursor'] = cursor;
-
-    const response = await slackApi('users.conversations', userToken, payload);
-    const channels = Array.isArray(response['channels']) ? response['channels'] : [];
-    for (const channelValue of channels) {
-      const channel = readSlackRecord(channelValue);
-      const id = channel ? readSlackString(channel, 'id') : '';
-      if (id) conversationIds.add(id);
-    }
-
-    cursor = readSlackString(readSlackRecord(response, 'response_metadata'), 'next_cursor');
-  } while (cursor);
-
-  slackAuthedUserConversationIds = conversationIds;
-  slackAuthedUserConversationsLoadedAt = Date.now();
-  debugSlackLog('Loaded Slack conversations for authed user membership filtering', {
-    count: conversationIds.size,
-  });
-}
-
-async function initializeSlackAuthedUserId(): Promise<void> {
-  if (slackAuthedUserId || !getSlackUserToken()) return;
-
-  try {
-    const response = await slackApi('auth.test', getSlackUserToken(), {});
-    slackAuthedUserId = readSlackString(response, 'user_id');
-    if (slackAuthedUserId) debugSlackLog('Slack authed user resolved', { authedUserId: slackAuthedUserId });
-  } catch (error) {
-    debugSlackLog('Could not resolve Slack authed user', { error: getErrorMessage(error) });
-  }
-}
-
-async function getSlackMessageSenderName(
-  event: Record<string, unknown>,
-  userId: string,
-  botId: string
-): Promise<string> {
-  const botProfile = readSlackRecord(event, 'bot_profile');
-  return readSlackString(event, 'username') ||
-    readSlackString(botProfile, 'name') ||
-    readSlackString(botProfile, 'real_name') ||
-    (userId ? await getSlackUserName(userId) : '') ||
-    botId;
-}
-
-async function getSlackUserName(userId: string): Promise<string> {
-  if (!getSlackWebApiToken() || !userId || slackUserNameById.has(userId)) {
-    return slackUserNameById.get(userId) || userId;
-  }
-
-  try {
-    const response = await slackApiWithFallback('users.info', [getSlackUserToken(), getSlackBotToken()], { user: userId });
-    const user = readSlackRecord(response, 'user');
-    const profile = user ? readSlackRecord(user, 'profile') : undefined;
-    const name = readSlackString(profile, 'display_name') ||
-      readSlackString(profile, 'real_name') ||
-      readSlackString(user, 'name') ||
-      userId;
-    slackUserNameById.set(userId, name);
-    return name;
-  } catch (error) {
-    debugSlackLog('Could not resolve Slack user', { userId, error: getErrorMessage(error) });
-    slackUserNameById.set(userId, userId);
-    return userId;
-  }
-}
-
-async function getSlackBotName(botId: string): Promise<string> {
-  if (!getSlackWebApiToken() || !botId || slackBotNameById.has(botId)) {
-    return slackBotNameById.get(botId) || botId;
-  }
-
-  try {
-    const response = await slackApiWithFallback('bots.info', [getSlackBotToken(), getSlackUserToken()], { bot: botId });
-    const bot = readSlackRecord(response, 'bot');
-    const botUserId = readSlackString(bot, 'user_id');
-    const userName = botUserId ? await getSlackUserName(botUserId) : '';
-    const name = userName ||
-      readSlackString(bot, 'name') ||
-      readSlackString(bot, 'real_name') ||
-      readSlackString(bot, 'app_name') ||
-      botId;
-    slackBotNameById.set(botId, name);
-    return name;
-  } catch (error) {
-    debugSlackLog('Could not resolve Slack bot', { botId, error: getErrorMessage(error) });
-    slackBotNameById.set(botId, botId);
-    return botId;
-  }
-}
-
-async function resolveSlackMessageMentions(text: string): Promise<string> {
-  const mentions = getSlackMentionIds(text);
-  if (mentions.length === 0) return text;
-
-  const resolvedNames = new Map<string, string>();
-  await Promise.all(mentions.map(async mentionId => {
-    resolvedNames.set(mentionId, await getSlackMentionName(mentionId));
-  }));
-
-  return text.replace(/<@([A-Z0-9]+)(?:\|([^>]+))?>/g, (_match, mentionId: string, fallbackName: string | undefined) => {
-    const resolvedName = resolvedNames.get(mentionId);
-    const fallback = fallbackName?.trim().replace(/^@/, '') || '';
-    const displayName = resolvedName && resolvedName !== mentionId ? resolvedName : (fallback || resolvedName || mentionId);
-    return `@${displayName}`;
-  });
-}
-
-function getSlackMentionIds(text: string): string[] {
-  const ids = new Set<string>();
-  for (const match of text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]+)?>/g)) {
-    const id = match[1]?.trim();
-    if (id) ids.add(id);
-  }
-  return [...ids];
-}
-
-async function getSlackMentionName(mentionId: string): Promise<string> {
-  return mentionId.startsWith('B')
-    ? getSlackBotName(mentionId)
-    : getSlackUserName(mentionId);
-}
-
-function getSlackNotificationChannelName(
-  channelInfo: SlackChannelInfo | undefined,
-  channelId: string,
-  senderName: string
-): string {
-  if (channelInfo?.type === 'im') {
-    if (channelInfo.name && !isRawSlackId(channelInfo.name)) return channelInfo.name;
-    if (senderName && !isRawSlackId(senderName)) return senderName;
-    return channelId;
-  }
-
-  return channelInfo?.name || channelId;
-}
-
-async function getSlackChannelInfo(channelId: string): Promise<SlackChannelInfo | undefined> {
-  if (!channelId) return undefined;
-  const cachedInfo = slackChannelInfoById.get(channelId);
-  if (cachedInfo) return cachedInfo;
-
-  const webApiToken = getSlackWebApiToken();
-  if (!webApiToken) {
-    const info = { name: channelId, isUserMember: true, type: getSlackFallbackChannelType(channelId) };
-    slackChannelInfoById.set(channelId, info);
-    return info;
-  }
-
-  try {
-    const response = await slackApi('conversations.info', getSlackUserToken() || webApiToken, { channel: channelId });
-    const channel = readSlackRecord(response, 'channel');
-    const type = getSlackChannelType(channel, channelId);
-    const channelUserId = readSlackString(channel, 'user');
-    const channelUserName = channelUserId ? await getSlackUserName(channelUserId) : '';
-    const name = type === 'im'
-      ? (channelUserName || channelUserId || channelId)
-      : (readSlackString(channel, 'name') || channelUserName || channelUserId || channelId);
-    const info = {
-      name,
-      isUserMember: getSlackUserChannelMembership(channel),
-      type,
-    };
-    slackChannelInfoById.set(channelId, info);
-    return info;
-  } catch (error) {
-    debugSlackLog('Could not resolve Slack channel', { channelId, error: getErrorMessage(error) });
-    const canVerifyMembership = isSlackOnlyUserChannelsEnabled() && Boolean(getSlackUserToken());
-    const knownUserConversation = Boolean(slackAuthedUserConversationIds?.has(channelId));
-    const info = {
-      name: channelId,
-      isUserMember: !canVerifyMembership || knownUserConversation,
-      type: getSlackFallbackChannelType(channelId),
-    };
-    slackChannelInfoById.set(channelId, info);
-    return info;
-  }
-}
-
-function getSlackChannelType(channel: Record<string, unknown> | undefined, channelId: string): string {
-  if (readSlackBoolean(channel, 'is_im')) return 'im';
-  if (readSlackBoolean(channel, 'is_mpim')) return 'mpim';
-  if (readSlackBoolean(channel, 'is_private')) return 'private_channel';
-  return getSlackFallbackChannelType(channelId);
-}
-
-function getSlackFallbackChannelType(channelId: string): string {
-  if (channelId.startsWith('D')) return 'im';
-  if (channelId.startsWith('G')) return 'private_channel';
-  return 'channel';
-}
-
-function getSlackUserChannelMembership(channel: Record<string, unknown> | undefined): boolean {
-  if (!isSlackOnlyUserChannelsEnabled() || !getSlackUserToken()) return true;
-
-  const isMember = readSlackBoolean(channel, 'is_member');
-  if (typeof isMember === 'boolean') return isMember;
-  if (readSlackBoolean(channel, 'is_im') || readSlackBoolean(channel, 'is_mpim')) return true;
-  return false;
-}
-
-async function getSlackPermalink(channelId: string, messageTs: string): Promise<string> {
-  if (!getSlackWebApiToken()) return '';
-
-  try {
-    const response = await slackApiWithFallback('chat.getPermalink', [getSlackUserToken(), getSlackBotToken()], {
-      channel: channelId,
-      message_ts: messageTs,
-    });
-    return readSlackString(response, 'permalink');
-  } catch (error) {
-    debugSlackLog('Could not resolve Slack permalink', { channelId, messageTs, error: getErrorMessage(error) });
-    return '';
-  }
-}
-
-async function slackApi(
-  method: string,
-  token: string,
-  payload: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  const trimmedToken = token.trim();
-  if (!trimmedToken) throw new Error(`${method} failed: missing Slack token`);
-
-  try {
-    const response: unknown = await getSlackClient(trimmedToken).apiCall(method, payload);
-    const responseRecord = readSlackRecord(response);
-    if (!responseRecord) throw new Error('Slack returned an invalid response');
-    return responseRecord;
-  } catch (error) {
-    throw new Error(formatSlackApiError(method, error));
-  }
-}
-
-function getSlackClient(token: string): WebClient {
-  const cachedClient = slackClientByToken.get(token);
-  if (cachedClient) return cachedClient;
-
-  const client = new WebClient(token);
-  slackClientByToken.set(token, client);
-  return client;
-}
-
-function formatSlackApiError(method: string, error: unknown): string {
-  const errorRecord = readSlackRecord(error);
-  const data = errorRecord ? readSlackRecord(errorRecord, 'data') : undefined;
-  if (data) {
-    const details = [
-      readSlackString(data, 'error'),
-      readSlackString(data, 'needed') ? `needed=${readSlackString(data, 'needed')}` : '',
-      readSlackString(data, 'provided') ? `provided=${readSlackString(data, 'provided')}` : '',
-    ].filter(Boolean);
-
-    details.push(...readSlackStringArray(readSlackRecord(data, 'response_metadata'), 'messages'));
-    if (details.length > 0) return `${method} failed: ${details.join('; ')}`;
-  }
-
-  return `${method} failed: ${getErrorMessage(error)}`;
-}
-
-async function slackApiWithFallback(
-  method: string,
-  tokens: string[],
-  payload: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  const usableTokens = tokens.filter(token => token.trim());
-  let lastError: unknown;
-  for (const token of usableTokens) {
-    try {
-      return await slackApi(method, token, payload);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError ?? new Error(`${method} failed: missing Slack token`);
-}
-
-function resetSlackApiState(nextSlackEnv: Record<string, string>): void {
-  slackApiEnv = nextSlackEnv;
-  slackUserNameById.clear();
-  slackBotNameById.clear();
-  slackChannelInfoById.clear();
-  slackClientByToken.clear();
-  slackThreadWrittenByAuthedUser.clear();
-  slackAuthedUserId = getSlackApiEnvValue('SLACK_USER_ID');
-  slackAuthedUserConversationIds = undefined;
-  slackAuthedUserConversationsLoadedAt = 0;
-}
-
-function getSlackApiEnvValue(key: string): string {
-  const processValue = process.env[key];
-  if (typeof processValue === 'string' && processValue.trim()) return processValue.trim();
-
-  const envValue = slackApiEnv[key];
-  return typeof envValue === 'string' ? envValue.trim() : '';
-}
-
-function getSlackUserToken(): string {
-  return getSlackApiEnvValue('SLACK_USER_TOKEN');
-}
-
-function getSlackBotToken(): string {
-  return getSlackApiEnvValue('SLACK_BOT_TOKEN');
-}
-
-function getSlackWebApiToken(): string {
-  return getSlackUserToken() || getSlackBotToken();
-}
-
-function isSlackOnlyUserChannelsEnabled(): boolean {
-  return getSlackApiEnvValue('SLACK_ONLY_USER_CHANNELS') !== '0';
-}
-
-function debugSlackEventDecision(decision: string, details: Record<string, unknown>): void {
-  debugSlackLog(`Slack event ${decision}`, details);
-}
-
-function debugSlackLog(message: string, details: Record<string, unknown> = {}): void {
-  const serializedDetails = Object.entries(details)
-    .filter(([, value]) => value !== undefined && value !== '')
-    .map(([key, value]) => `${key}=${formatDebugValue(value)}`)
-    .join(' ');
-  appendDebugLogFile(SLACK_SOCKET_DEBUG_LOG_FILE, `${message}${serializedDetails ? ` ${serializedDetails}` : ''}`);
-}
-
-function readSlackRecord(value: unknown, key?: string): Record<string, unknown> | undefined {
-  const candidate = key && typeof value === 'object' && value !== null
-    ? (value as Record<string, unknown>)[key]
-    : value;
-  return typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
-    ? candidate as Record<string, unknown>
-    : undefined;
-}
-
-function readSlackString(record: Record<string, unknown> | undefined, key: string): string {
-  if (!record) return '';
-  const value = record[key];
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function readSlackStringArray(record: Record<string, unknown> | undefined, key: string): string[] {
-  if (!record) return [];
-  const value = record[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-    .map(item => item.trim());
-}
-
-function readSlackBoolean(record: Record<string, unknown> | undefined, key: string): boolean | undefined {
-  if (!record) return undefined;
-  const value = record[key];
-  return typeof value === 'boolean' ? value : undefined;
-}
-
-function isRawSlackId(value: string): boolean {
-  return /^[A-Z][A-Z0-9]{8,}$/.test(value);
-}
-
-function handleSlackNotification(notification: SlackNotification): void {
-  const existingIndex = slackNotifications.findIndex(existing => existing.id === notification.id);
-  if (existingIndex >= 0) slackNotifications.splice(existingIndex, 1);
-
-  const mergeIndex = existingIndex < 0 ? findSlackNotificationMergeIndex(notification) : -1;
-  const nextNotification = mergeIndex >= 0
-    ? mergeSlackNotifications(slackNotifications.splice(mergeIndex, 1)[0], notification)
-    : notification;
-
-  slackNotifications.unshift(nextNotification);
-  while (slackNotifications.length > MAX_SLACK_NOTIFICATIONS) slackNotifications.pop();
-  saveSlackNotifications(slackNotifications);
-
-  mainWindow?.webContents.send('slack:notification', nextNotification);
-  if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true);
-}
-
-function findSlackNotificationMergeIndex(notification: SlackNotification): number {
-  const mergeKey = getSlackNotificationMergeKey(notification);
-  if (!mergeKey) return -1;
-  return slackNotifications.findIndex(existing => getSlackNotificationMergeKey(existing) === mergeKey);
-}
-
-function getSlackNotificationMergeKey(notification: SlackNotification): string | null {
-  const channelId = notification.channelId?.trim();
-  if (!channelId) return null;
-
-  const teamId = notification.teamId?.trim() ?? '';
-  if (isSlackDirectMessageChannel(channelId, notification.channelType)) return `dm:${teamId}:${channelId}`;
-
-  const threadRootTs = notification.threadTs?.trim() || notification.ts?.trim();
-  return threadRootTs ? `thread:${teamId}:${channelId}:${threadRootTs}` : null;
-}
-
-function mergeSlackNotifications(existing: SlackNotification | undefined, incoming: SlackNotification): SlackNotification {
-  if (!existing) return incoming;
-
-  const messageCount = (existing.messageCount ?? 1) + 1;
-  const merged: SlackNotification = {
-    id: existing.id,
-    text: mergeSlackNotificationText(existing, incoming),
-    receivedAt: Math.max(existing.receivedAt, incoming.receivedAt),
-    messageCount,
-  };
-  const priority = getHigherSlackNotificationPriority(existing, incoming);
-  merged.priorityRank = priority.rank;
-  merged.priorityLabel = priority.label;
-  addOptionalSlackString(merged, 'teamId', existing.teamId || incoming.teamId || '');
-  addOptionalSlackString(merged, 'teamName', existing.teamName || incoming.teamName || '');
-  addOptionalSlackString(merged, 'channelId', existing.channelId || incoming.channelId || '');
-  addOptionalSlackString(merged, 'channelName', existing.channelName || incoming.channelName || '');
-  addOptionalSlackString(merged, 'channelType', existing.channelType || incoming.channelType || '');
-  addOptionalSlackString(merged, 'userId', incoming.userId || existing.userId || '');
-  addOptionalSlackString(merged, 'userName', getMergedSlackUserName(existing, incoming) || '');
-  addOptionalSlackString(merged, 'ts', incoming.ts || existing.ts || '');
-  addOptionalSlackString(merged, 'threadTs', existing.threadTs || incoming.threadTs || '');
-  addOptionalSlackString(merged, 'permalink', incoming.permalink || existing.permalink || '');
-  return merged;
-}
-
-function getHigherSlackNotificationPriority(
-  existing: SlackNotification,
-  incoming: SlackNotification
-): SlackNotificationPriority {
-  const existingRank = normalizeSlackPriorityRank(existing.priorityRank ?? SLACK_PRIORITY_OTHER.rank);
-  const incomingRank = normalizeSlackPriorityRank(incoming.priorityRank ?? SLACK_PRIORITY_OTHER.rank);
-  if (incomingRank < existingRank) return { rank: incomingRank, label: incoming.priorityLabel ?? getSlackPriorityLabelForRank(incomingRank) };
-  return { rank: existingRank, label: existing.priorityLabel ?? getSlackPriorityLabelForRank(existingRank) };
-}
-
-function getSlackPriorityLabelForRank(rank: number): SlackNotificationPriorityLabel {
-  switch (normalizeSlackPriorityRank(rank)) {
-    case SLACK_PRIORITY_MENTION.rank:
-      return SLACK_PRIORITY_MENTION.label;
-    case SLACK_PRIORITY_DM.rank:
-      return SLACK_PRIORITY_DM.label;
-    case SLACK_PRIORITY_THREAD_MENTION.rank:
-      return SLACK_PRIORITY_THREAD_MENTION.label;
-    case SLACK_PRIORITY_THREAD_WRITTEN.rank:
-      return SLACK_PRIORITY_THREAD_WRITTEN.label;
-    default:
-      return SLACK_PRIORITY_OTHER.label;
-  }
-}
-
-function getMergedSlackUserName(existing: SlackNotification, incoming: SlackNotification): string | undefined {
-  const existingUser = existing.userName?.trim();
-  const incomingUser = incoming.userName?.trim();
-  if (!existingUser) return incomingUser || undefined;
-  if (!incomingUser || incomingUser === existingUser) return existingUser;
-  return 'Multiple people';
-}
-
-function mergeSlackNotificationText(existing: SlackNotification, incoming: SlackNotification): string {
-  const existingText = existing.messageCount && existing.messageCount > 1
-    ? existing.text
-    : formatSlackNotificationMessageLine(existing);
-  return truncateSlackText(`${existingText}\n${formatSlackNotificationMessageLine(incoming)}`);
-}
-
-function formatSlackNotificationMessageLine(notification: SlackNotification): string {
-  const sender = notification.userName?.trim();
-  const text = notification.text.trim() || '(no text)';
-  return sender ? `${sender}: ${text}` : text;
-}
-
-function handleSlackNotificationDismiss(request: SlackNotificationDismissRequest): number {
-  if (!isSlackDirectMessageChannel(request.channelId, request.channelType)) return 0;
-
-  const existingIndex = findSlackNotificationDismissIndex(request);
-  if (existingIndex < 0) return 0;
-
-  slackNotifications.splice(existingIndex, 1);
-  saveSlackNotifications(slackNotifications);
-  mainWindow?.webContents.send('slack:list-update', slackNotifications.map(notification => ({ ...notification })));
-  return 1;
-}
-
-function findSlackNotificationDismissIndex(request: SlackNotificationDismissRequest): number {
-  const targetTs = request.targetTs?.trim();
-  if (targetTs) {
-    return slackNotifications.findIndex(notification =>
-      matchesSlackNotificationConversation(notification, request) &&
-      (notification.ts === targetTs || notification.threadTs === targetTs)
-    );
-  }
-
-  const replyTs = (request.replyTs ?? request.ts)?.trim();
-  const replyAt = parseSlackTimestamp(replyTs);
-  const receivedAt = request.receivedAt;
-
-  let fallbackIndex = -1;
-  let fallbackScore = Number.NEGATIVE_INFINITY;
-  for (let index = 0; index < slackNotifications.length; index += 1) {
-    const notification = slackNotifications[index];
-    if (!notification || !matchesSlackNotificationConversation(notification, request)) continue;
-
-    const notificationTs = parseSlackTimestamp(notification.ts);
-    if (replyAt !== null && notificationTs !== null) {
-      if (notificationTs >= replyAt) continue;
-      if (notificationTs > fallbackScore) {
-        fallbackScore = notificationTs;
-        fallbackIndex = index;
-      }
-      continue;
-    }
-
-    if (receivedAt !== undefined && notification.receivedAt > receivedAt) continue;
-    return index;
-  }
-  return fallbackIndex;
-}
-
-function matchesSlackNotificationConversation(
-  notification: SlackNotification,
-  request: SlackNotificationDismissRequest
-): boolean {
-  if (notification.channelId !== request.channelId) return false;
-  if (request.teamId && notification.teamId && notification.teamId !== request.teamId) return false;
-  return true;
-}
-
-function parseSlackTimestamp(value: string | undefined): number | null {
-  if (!value) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isSlackDirectMessageChannel(channelId: string, channelType?: string): boolean {
-  return channelType === 'im' || channelType === 'mpim' || channelId.startsWith('D');
-}
-
-function removeSlackNotification(id: string): boolean {
-  const existingIndex = slackNotifications.findIndex(existing => existing.id === id);
-  if (existingIndex < 0) return false;
-
-  slackNotifications.splice(existingIndex, 1);
-  saveSlackNotifications(slackNotifications);
-  mainWindow?.webContents.send('slack:list-update', slackNotifications.map(notification => ({ ...notification })));
-  return true;
-}
-
-async function openSlackNotification(id: string): Promise<boolean> {
-  const notification = slackNotifications.find(existing => existing.id === id);
-  if (!notification) return false;
-
-  const targetUrls = getSlackNotificationTargetUrls(notification);
-  if (targetUrls.length === 0) return false;
-
-  for (const targetUrl of targetUrls) {
-    try {
-      await shell.openExternal(targetUrl);
-      return true;
-    } catch (error) {
-      debugSlackLog('Could not open Slack notification target', {
-        targetUrl,
-        error: getErrorMessage(error),
-      });
-    }
-  }
-
-  return false;
-}
-
-function getSlackNotificationTargetUrls(notification: SlackNotification): string[] {
-  const targetUrls = [
-    getSlackNotificationAppTargetUrl(notification),
-    getSlackNotificationWebTargetUrl(notification),
-  ].filter((targetUrl): targetUrl is string => Boolean(targetUrl));
-
-  return [...new Set(targetUrls)];
-}
-
-function getSlackNotificationAppTargetUrl(notification: SlackNotification): string | null {
-  const teamId = notification.teamId?.trim();
-  const channelId = notification.channelId?.trim();
-  if (!teamId) return null;
-
-  if (channelId) {
-    const messageTs = notification.ts?.trim();
-    const messageQuery = messageTs ? `&message=${encodeURIComponent(messageTs)}` : '';
-    const threadTs = getSlackNotificationThreadReplyTs(notification);
-    const threadQuery = threadTs ? `&thread_ts=${encodeURIComponent(threadTs)}` : '';
-    return `slack://channel?team=${encodeURIComponent(teamId)}&id=${encodeURIComponent(channelId)}${messageQuery}${threadQuery}`;
-  }
-
-  const channelType = notification.channelType?.trim();
-  const userId = notification.userId?.trim();
-  if (channelType === 'im' && userId) {
-    return `slack://user?team=${encodeURIComponent(teamId)}&id=${encodeURIComponent(userId)}`;
-  }
-
-  return `slack://open?team=${encodeURIComponent(teamId)}`;
-}
-
-function getSlackNotificationWebTargetUrl(notification: SlackNotification): string | null {
-  if (notification.permalink) return notification.permalink;
-
-  const channelId = notification.channelId?.trim();
-  if (!channelId) return null;
-
-  const targetUrl = new URL('https://slack.com/app_redirect');
-  targetUrl.searchParams.set('channel', channelId);
-
-  const messageTs = notification.ts?.trim();
-  if (messageTs) targetUrl.searchParams.set('message_ts', messageTs);
-
-  const threadTs = getSlackNotificationThreadReplyTs(notification);
-  if (threadTs) {
-    targetUrl.searchParams.set('thread_ts', threadTs);
-    targetUrl.searchParams.set('cid', channelId);
-  }
-
-  const teamId = notification.teamId?.trim();
-  if (teamId) targetUrl.searchParams.set('team', teamId);
-  return targetUrl.toString();
-}
-
-function getSlackNotificationThreadReplyTs(notification: SlackNotification): string {
-  const threadTs = notification.threadTs?.trim();
-  const messageTs = notification.ts?.trim();
-  return threadTs && threadTs !== messageTs ? threadTs : '';
-}
-
-function restorePersistedSlackNotifications(): void {
-  slackNotifications.length = 0;
-  slackNotifications.push(...loadSlackNotifications().slice(0, MAX_SLACK_NOTIFICATIONS));
-}
-
 function restorePersistedManualTasks(): void {
   manualTasks.length = 0;
   manualTasks.push(...loadManualTasks().slice(0, MAX_MANUAL_TASKS));
@@ -3693,21 +2214,12 @@ async function handleTerminalUpdateHttpRequest(
   const isTaskApiPath = requestPath === '/api/tasks' ||
     requestPath === '/api/task/add' ||
     requestPath === '/api/manual-task/add';
-  const isSlackEventPath = requestPath === SLACK_EVENT_PATH ||
-    requestPath === EXTENSION_SLACK_EVENT_PATH;
-  const isSlackNotificationPath = requestPath === SLACK_NOTIFICATION_PATH ||
-    requestPath === EXTENSION_SLACK_NOTIFICATION_PATH;
-  const isSlackNotificationDismissPath = requestPath === SLACK_NOTIFICATION_DISMISS_PATH ||
-    requestPath === EXTENSION_SLACK_NOTIFICATION_DISMISS_PATH;
   if (
     request.method !== 'POST' ||
     (
       !isTerminalUpdatePath &&
       !isTerminalEventPath &&
-      !isTaskApiPath &&
-      !isSlackEventPath &&
-      !isSlackNotificationPath &&
-      !isSlackNotificationDismissPath
+      !isTaskApiPath
     )
   ) {
     writeJsonResponse(response, 404, { ok: false, error: 'not_found' });
@@ -3731,31 +2243,6 @@ async function handleTerminalUpdateHttpRequest(
     }
     writeJsonResponse(response, 200, { ok: true, task });
     return;
-  } else if (isSlackEventPath) {
-    try {
-      await handleSlackEventEnvelope(parsedPayload);
-    } catch (error) {
-      const message = getErrorMessage(error);
-      debugSlackLog('Slack event handling failed', { error: message });
-      writeJsonResponse(response, 500, { ok: false, error: message });
-      return;
-    }
-  } else if (isSlackNotificationDismissPath) {
-    const dismissRequest = parseSlackNotificationDismissRequest(parsedPayload);
-    if (!dismissRequest) {
-      writeJsonResponse(response, 400, { ok: false, error: 'invalid_slack_notification_dismiss' });
-      return;
-    }
-    const removed = handleSlackNotificationDismiss(dismissRequest);
-    writeJsonResponse(response, 200, { ok: true, removed });
-    return;
-  } else if (isSlackNotificationPath) {
-    const notification = parseSlackNotificationRequest(parsedPayload);
-    if (!notification) {
-      writeJsonResponse(response, 400, { ok: false, error: 'invalid_slack_notification' });
-      return;
-    }
-    handleSlackNotification(notification);
   } else if (isTerminalEventPath) {
     const event = parseTerminalEventRequest(parsedPayload);
     if (!event) {
@@ -3931,35 +2418,6 @@ function setupLegacyIpc(): void {
     }
     return removeRecurringTask(id.trim());
   });
-
-  ipcMain.handle('slack:list', () => slackNotifications.map(notification => ({ ...notification })));
-
-  ipcMain.handle('slack:clear', () => {
-    slackNotifications.length = 0;
-    saveSlackNotifications(slackNotifications);
-    mainWindow?.webContents.send('slack:list-update', []);
-  });
-
-  ipcMain.handle('slack:remove', (_event, id: unknown) => {
-    if (typeof id !== 'string' || !id.trim()) return false;
-    return removeSlackNotification(id.trim());
-  });
-
-  ipcMain.handle('slack:open', async (_event, id: unknown) => {
-    if (typeof id !== 'string' || !id.trim()) return false;
-    try {
-      return await openSlackNotification(id.trim());
-    } catch (error) {
-      console.error(`Failed to open Slack notification: ${getErrorMessage(error)}`);
-      return false;
-    }
-  });
-
-  ipcMain.handle('slack:start-auth', () => startSlackAuthFlow());
-
-  ipcMain.handle('slack:start-listener', () => startSlackSocketListener({ notifyIfMissingConfig: true }));
-
-  ipcMain.handle('slack:get-listener-status', () => slackListenerStatus);
 }
 
 function setupBackendIpc(): void {
@@ -4132,46 +2590,6 @@ function setupBackendIpc(): void {
       return false;
     }
   });
-
-  ipcMain.handle('slack:list', async () => {
-    try {
-      const result = await backendGet<BackendSlackNotificationsResponse>('/api/slack/notifications');
-      applyBackendSlackNotifications(result.slackNotifications);
-      return result.slackNotifications;
-    } catch (error) {
-      console.error(`Failed to list Slack notifications: ${getErrorMessage(error)}`);
-      return slackNotifications.map(notification => ({ ...notification }));
-    }
-  });
-
-  ipcMain.handle('slack:clear', async () => {
-    await backendPost<BackendBooleanResponse>('/api/slack/clear');
-  });
-
-  ipcMain.handle('slack:remove', async (_event, id: unknown) => {
-    try {
-      const result = await backendPost<BackendBooleanResponse>('/api/slack/remove', { id });
-      return result.removed ?? false;
-    } catch {
-      return false;
-    }
-  });
-
-  ipcMain.handle('slack:open', async (_event, id: unknown) => {
-    if (typeof id !== 'string' || !id.trim()) return false;
-    try {
-      return await openSlackNotification(id.trim());
-    } catch (error) {
-      console.error(`Failed to open Slack notification: ${getErrorMessage(error)}`);
-      return false;
-    }
-  });
-
-  ipcMain.handle('slack:start-auth', () => startSlackAuthFlow());
-
-  ipcMain.handle('slack:start-listener', () => startSlackSocketListener({ notifyIfMissingConfig: true }));
-
-  ipcMain.handle('slack:get-listener-status', () => slackListenerStatus);
 }
 
 function setupIpc(): void {
@@ -4324,7 +2742,7 @@ function setupSharedIpc(): void {
 }
 
 // In-flight reconnect promises keyed by session id. Used so concurrent
-// renderer requests for the same session collapse into one supervisor call —
+// renderer requests for the same session collapse into one supervisor call â€”
 // otherwise the supervisor would reject the second spawn with
 // "session already exists" even though the reconnect actually succeeded.
 const sshReconnectInFlight = new Map<string, Promise<SshReconnectResult>>();
@@ -4357,7 +2775,7 @@ async function reconnectShellSshSession(sessionId: string): Promise<SshReconnect
       } catch (error) {
         const message = getErrorMessage(error);
         // Supervisor may have a stale session from a previous reconnect
-        // race — treat that as success and let the renderer attach.
+        // race â€” treat that as success and let the renderer attach.
         if (/already\s*exists/i.test(message)) {
           debugTerminalUpdate('shell ssh reconnect idempotent', { id: sessionId });
           return { ok: true, sessionId };
@@ -4453,7 +2871,7 @@ function buildSshConnectOptions(session: Session): {
 function parseSshCommand(value: string | undefined): { host: string; username: string; port: number } | null {
   if (!value) return null;
   const trimmed = value.trim();
-  // user@host[:port] — does not handle IPv6 with brackets; falls back to null.
+  // user@host[:port] â€” does not handle IPv6 with brackets; falls back to null.
   const m = /^([^@\s]+)@([^@:\s]+)(?::(\d+))?$/.exec(trimmed);
   if (!m) return null;
   const username = m[1];
@@ -4623,12 +3041,15 @@ function createWindow(): void {
     restorePersistedSessions(settings);
     restorePersistedManualTasks();
     restorePersistedRecurringTasks();
-    restorePersistedSlackNotifications();
     startRecurringTaskScheduler();
   }
   restorePersistedGoogleCalendarEvents();
   startGoogleCalendarScheduler();
-  void mainWindow.loadFile(path.join(__dirname, '..', '..', 'desktop', 'index.html'));
+  if (process.env['NODE_ENV'] === 'development') {
+    void mainWindow.loadURL('http://localhost:5173');
+  } else {
+    void mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  }
 }
 
 setupIpc();
@@ -4654,7 +3075,6 @@ void app.whenReady().then(async () => {
     createWindow();
     await startTerminalUpdateServer();
   }
-  startSlackSocketListener({ notifyIfMissingConfig: false });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -4667,8 +3087,6 @@ app.on('before-quit', () => {
   isQuitting = true;
   stopRecurringTaskScheduler();
   stopGoogleCalendarScheduler();
-  stopSlackAuthFlow();
-  stopSlackSocketListener();
   stopTerminalUpdateServer();
 });
 
@@ -4677,3 +3095,4 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+

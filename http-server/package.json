@@ -12,6 +12,6 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@slack/web-api": "^7.16.0"
+    "multitasker": "file:.."
   }
 }

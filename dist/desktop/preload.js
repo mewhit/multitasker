@@ -29,25 +29,6 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     onRecurringTaskListUpdate: (cb) => {
         electron_1.ipcRenderer.on('recurring-task:list-update', (_event, tasks) => cb(tasks));
     },
-    getSlackNotifications: () => electron_1.ipcRenderer.invoke('slack:list'),
-    clearSlackNotifications: () => electron_1.ipcRenderer.invoke('slack:clear'),
-    removeSlackNotification: (id) => electron_1.ipcRenderer.invoke('slack:remove', id),
-    openSlackNotification: (id) => electron_1.ipcRenderer.invoke('slack:open', id),
-    startSlackAuth: () => electron_1.ipcRenderer.invoke('slack:start-auth'),
-    startSlackListener: () => electron_1.ipcRenderer.invoke('slack:start-listener'),
-    getSlackListenerStatus: () => electron_1.ipcRenderer.invoke('slack:get-listener-status'),
-    onSlackNotification: (cb) => {
-        electron_1.ipcRenderer.on('slack:notification', (_event, notification) => cb(notification));
-    },
-    onSlackListUpdate: (cb) => {
-        electron_1.ipcRenderer.on('slack:list-update', (_event, notifications) => cb(notifications));
-    },
-    onSlackAuthStatus: (cb) => {
-        electron_1.ipcRenderer.on('slack:auth-status', (_event, payload) => cb(payload));
-    },
-    onSlackListenerStatus: (cb) => {
-        electron_1.ipcRenderer.on('slack:listener-status', (_event, payload) => cb(payload));
-    },
     getGoogleCalendarEvents: () => electron_1.ipcRenderer.invoke('google-calendar:list'),
     getGoogleCalendarStatus: () => electron_1.ipcRenderer.invoke('google-calendar:status'),
     connectGoogleCalendar: () => electron_1.ipcRenderer.invoke('google-calendar:connect'),

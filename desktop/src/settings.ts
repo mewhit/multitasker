@@ -1,1 +1,1 @@
-export * from '../../shared/settings';
+export * from "../../shared/settings";

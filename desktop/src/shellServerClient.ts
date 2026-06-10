@@ -28,6 +28,12 @@ export interface CreatedShellPty {
   rows: number;
 }
 
+export interface KillShellSessionOptions {
+  sessionId: string;
+  signal?: string;
+  token?: string;
+}
+
 export function getShellServerUrl(): string {
   return process.env['MULTITASKER_SHELL_SERVER_URL']?.trim() || DEFAULT_SHELL_SERVER_URL;
 }
@@ -220,6 +226,83 @@ export function createShellPty(opts: CreateShellPtyOptions = {}): Promise<Create
       if (opts.cols !== undefined) payload['cols'] = opts.cols;
       if (opts.rows !== undefined) payload['rows'] = opts.rows;
       ws.send(JSON.stringify(payload));
+    }
+  });
+}
+
+export function killShellSession(opts: KillShellSessionOptions): Promise<void> {
+  const url = getShellServerUrl();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimer);
+      clearTimeout(requestTimer);
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      if (err) reject(err);
+      else resolve();
+    };
+
+    const ws = new WebSocket(url);
+    const connectTimer = setTimeout(
+      () => finish(new Error(`shell server connect timeout (${url})`)),
+      CONNECT_TIMEOUT_MS
+    );
+    const requestTimer = setTimeout(
+      () => finish(new Error('shell server request timeout')),
+      REQUEST_TIMEOUT_MS
+    );
+
+    ws.on('error', (err) => finish(err));
+    ws.on('close', () => {
+      if (!settled) finish(new Error('shell server closed connection'));
+    });
+    ws.on('message', (raw) => {
+      let msg: unknown;
+      try {
+        msg = JSON.parse(raw.toString('utf8'));
+      } catch {
+        return;
+      }
+      if (!msg || typeof msg !== 'object') return;
+      const m = msg as { type?: string; code?: string; message?: string };
+      if (m.type === 'ready') {
+        clearTimeout(connectTimer);
+        const ready = msg as { requiresAuth?: boolean; authenticated?: boolean };
+        if (ready.requiresAuth && !ready.authenticated) {
+          if (!opts.token) {
+            finish(new Error('shell server requires auth token (set SHELL_AUTH_TOKEN)'));
+            return;
+          }
+          ws.send(JSON.stringify({ type: 'hello', token: opts.token }));
+          return;
+        }
+        sendKill();
+        return;
+      }
+      if (m.type === 'authenticated') {
+        sendKill();
+        return;
+      }
+      if (m.type === 'error') {
+        if (m.code === 'unknown_session') {
+          finish();
+          return;
+        }
+        finish(new Error(`shell server error [${m.code ?? '?'}]: ${m.message ?? 'unknown'}`));
+      }
+    });
+
+    function sendKill(): void {
+      const payload: Record<string, unknown> = { type: 'kill', sessionId: opts.sessionId };
+      if (opts.signal !== undefined) payload['signal'] = opts.signal;
+      ws.send(JSON.stringify(payload));
+      finish();
     }
   });
 }

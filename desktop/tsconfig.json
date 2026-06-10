@@ -1,12 +1,5 @@
 {
-    "extends":  "../tsconfig.json",
-    "include":  [
-                    "./**/*.ts",
-                    "../shared/**/*.ts"
-                ],
-    "exclude":  [
-                    "node_modules",
-                    "src/renderer",
-                    "vite.config.ts"
-                ]
+  "extends": "../tsconfig.json",
+  "include": ["./**/*.ts", "../shared/**/*.ts"],
+  "exclude": ["node_modules", "src/renderer", "vite.config.ts"]
 }

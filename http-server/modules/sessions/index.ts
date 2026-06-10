@@ -7,11 +7,12 @@ import {
   sessionManager,
   multitaskerSessionIdByShellSessionId,
   pendingClientMetadataByShellSessionId,
+  removedSessionIds,
 } from '../../state/sessions';
 import { saveSessions, loadSettings, normalizeClientMetadata } from '../../../shared/settings';
 import { readPayloadString, readStringField, readOptionalNumberField } from '../../utils/payload';
 import { isShellType } from '../../utils/types';
-import { flushPendingTerminalUpdates, flushPendingTerminalEvents, forgetRemovedSession, handleTerminalUpdate } from '../terminals/apply';
+import { flushPendingTerminalUpdates, flushPendingTerminalEvents, forgetRemovedSession, markSessionRemoved, handleTerminalUpdate } from '../terminals/apply';
 import { getSessionsStateToSave } from './parse';
 
 export const sessionsModule: HttpModule = {
@@ -44,11 +45,16 @@ export const sessionsModule: HttpModule = {
         method: 'POST',
         path: '/api/session/create',
         handler({ payload, response }) {
-          const session = createSessionFromPayload(payload);
-          if (!session) {
+          const result = createSessionFromPayload(payload);
+          if (result.kind === 'invalid') {
             writeJsonResponse(response, 400, { ok: false, error: 'invalid_session' });
             return;
           }
+          if (result.kind === 'skipped') {
+            writeJsonResponse(response, 200, { ok: true, skipped: true });
+            return;
+          }
+          const { session } = result;
           writeJsonResponse(response, 200, { ok: true, session });
         },
       },
@@ -133,8 +139,13 @@ export const sessionsModule: HttpModule = {
   },
 };
 
-function createSessionFromPayload(payload: unknown): Session | null {
-  if (typeof payload !== 'object' || payload === null) return null;
+type CreateSessionResult =
+  | { kind: 'created'; session: Session }
+  | { kind: 'skipped' }
+  | { kind: 'invalid' };
+
+function createSessionFromPayload(payload: unknown): CreateSessionResult {
+  if (typeof payload !== 'object' || payload === null) return { kind: 'invalid' };
   const record = payload as Record<string, unknown>;
   const settings = loadSettings();
   const name = readStringField(record, 'name').trim();
@@ -146,11 +157,15 @@ function createSessionFromPayload(payload: unknown): Session | null {
   const sshOptions = parseSshOptionsPayload(record['sshOptions']);
   const shellSessionId = readStringField(record, 'shellSessionId').trim();
   const requestedId = readStringField(record, 'requestedId').trim();
-  if (!name) return null;
+  if (!name) return { kind: 'invalid' };
   if (shellType === 'ssh') {
-    if (!sshCommand) return null;
+    if (!sshCommand) return { kind: 'invalid' };
   } else if (!cwd) {
-    return null;
+    return { kind: 'invalid' };
+  }
+
+  if (isRemovedShellSessionCreate(requestedId, shellSessionId)) {
+    return { kind: 'skipped' };
   }
 
   const session = sessionManager.createSession(
@@ -178,7 +193,14 @@ function createSessionFromPayload(payload: unknown): Session | null {
   saveSessions(getSessionsStateToSave());
   flushPendingTerminalUpdates(session.id);
   flushPendingTerminalEvents(session.id);
-  return session;
+  return { kind: 'created', session };
+}
+
+function isRemovedShellSessionCreate(requestedId: string, shellSessionId: string): boolean {
+  return Boolean(
+    (requestedId && removedSessionIds.has(requestedId)) ||
+    (shellSessionId && removedSessionIds.has(shellSessionId))
+  );
 }
 
 function parseSshOptionsPayload(value: unknown): import('../../../shared/settings').SessionSshOptions | undefined {
@@ -201,6 +223,7 @@ function parseSshOptionsPayload(value: unknown): import('../../../shared/setting
 
 function removeSessionById(id: string): void {
   sessionManager.removeSession(id);
+  markSessionRemoved(id);
   // Drop any shell→multitasker mapping entries pointing at this session.
   for (const [shellId, mtId] of multitaskerSessionIdByShellSessionId) {
     if (mtId === id) multitaskerSessionIdByShellSessionId.delete(shellId);

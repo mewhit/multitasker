@@ -1,1 +1,1 @@
-export * from '../../shared/sessionManager';
+export * from "../../shared/sessionManager";

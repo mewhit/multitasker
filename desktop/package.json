@@ -2,9 +2,11 @@
   "name": "@multitasker/desktop",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "main": "../dist/desktop/src/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && vite build",
-    "dev": "concurrently -k -n tsc:desktop,vite,electron -c blue,cyan,green \"tsc -w -p tsconfig.json\" \"vite\" \"node ..\\scripts\\dev-electron.js\"",
+    "build": "electron-vite build",
+    "dev": "electron-vite dev",
     "start": "electron .."
   },
   "devDependencies": {
@@ -13,8 +15,8 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.2",
-    "concurrently": "^9.2.1",
     "electron": "^42.0.1",
+    "electron-vite": "^5.0.0",
     "typescript": "^5.9.3",
     "vite": "^8.0.16"
   },

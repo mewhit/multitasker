@@ -5,13 +5,14 @@ const { loadDotenv } = require('./load-dotenv');
 
 const projectRoot = path.resolve(__dirname, '..');
 loadDotenv(path.join(projectRoot, '.env'));
-const distDir = path.join(projectRoot, 'dist');
-const shellDistDir = path.join(distDir, 'shell');
-const wsServerDistDir = path.join(distDir, 'ws-server');
-const serverFile = path.join(wsServerDistDir, 'server.js');
+const wsServerDir = path.join(projectRoot, 'ws-server');
+const shellDir = path.join(projectRoot, 'shell');
+const sharedDir = path.join(projectRoot, 'shared');
+const tsxCli = path.join(wsServerDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const serverFile = path.join(wsServerDir, 'server.ts');
+const tsconfigFile = path.join(wsServerDir, 'tsconfig.json');
 const defaultLogFile = path.join(projectRoot, '.tmp', 'ws-server', 'server.log');
 const restartDebounceMs = 300;
-const fileCheckMs = 250;
 const gracefulShutdownMs = 2000;
 
 let child = null;
@@ -34,24 +35,12 @@ function resolveLogFile() {
   return defaultLogFile;
 }
 
-function waitForBuild() {
-  if (fs.existsSync(serverFile)) return Promise.resolve();
-  log('waiting for dist\\ws-server\\server.js...');
-  return new Promise((resolve) => {
-    const timer = setInterval(() => {
-      if (!fs.existsSync(serverFile)) return;
-      clearInterval(timer);
-      resolve();
-    }, fileCheckMs);
-  });
-}
-
 function startShell(reason) {
   if (shuttingDown || child) return;
   const logFile = resolveLogFile();
   const logLevel = process.env.SHELL_LOG_LEVEL || 'info';
   log(`${reason}: starting shell server (log level=${logLevel}, log file=${logFile || '<stderr only>'})`);
-  child = spawn(process.execPath, [serverFile], {
+  child = spawn(process.execPath, [tsxCli, '--tsconfig', tsconfigFile, serverFile], {
     cwd: projectRoot,
     stdio: 'inherit',
     env: {
@@ -99,14 +88,15 @@ function restartShell(reason) {
   procToStop.kill();
 }
 
-// Watch the gateway output AND the core/ipc modules it consumes (logger,
-// analyzer, protocol, etc). PTYs live in the supervisor process - restarting
-// the gateway is safe; existing PTYs survive and reattach.
-function watchShellDist() {
+// Watch the gateway source AND the core/ipc/shared modules it consumes. PTYs
+// live in the supervisor process - restarting the gateway is safe; existing
+// PTYs survive and reattach.
+function watchShellSources() {
   const dirsToWatch = [
-    wsServerDistDir,
-    path.join(shellDistDir, 'core'),
-    path.join(shellDistDir, 'ipc'),
+    wsServerDir,
+    path.join(shellDir, 'core'),
+    path.join(shellDir, 'ipc'),
+    sharedDir,
   ];
   for (const dir of dirsToWatch) {
     if (!fs.existsSync(dir)) {
@@ -118,11 +108,8 @@ function watchShellDist() {
         return;
       }
       const changedFile = String(fileName);
-      if (changedFile.endsWith('.js') || changedFile.endsWith('.json')) {
-        const relBase = dir === wsServerDistDir
-          ? path.join('dist', 'ws-server')
-          : path.join('dist', 'shell', path.basename(dir));
-        scheduleRestart(path.join(relBase, changedFile));
+      if (changedFile.endsWith('.ts') || changedFile.endsWith('.json')) {
+        scheduleRestart(path.relative(projectRoot, path.join(dir, changedFile)));
       }
     });
     watchers.push(w);
@@ -151,8 +138,7 @@ function shutdown(code) {
 }
 
 async function main() {
-  await waitForBuild();
-  watchShellDist();
+  watchShellSources();
   startShell('initial');
 }
 
@@ -163,4 +149,3 @@ main().catch((error) => {
   console.error(`[dev-shell] ${error instanceof Error ? error.message : String(error)}`);
   shutdown(1);
 });
-

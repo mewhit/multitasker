@@ -13,16 +13,19 @@ const { loadDotenv } = require('./load-dotenv');
 
 const projectRoot = path.resolve(__dirname, '..');
 loadDotenv(path.join(projectRoot, '.env'));
-const distDir = path.join(projectRoot, 'dist');
-const supervisorEntry = path.join(distDir, 'shell', 'supervisor', 'index.js');
+const shellDir = path.join(projectRoot, 'shell');
+const sharedDir = path.join(projectRoot, 'shared');
+const tsxCli = path.join(shellDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const supervisorEntry = path.join(shellDir, 'supervisor', 'index.ts');
+const tsconfigFile = path.join(shellDir, 'tsconfig.json');
 const defaultLogFile = path.join(projectRoot, '.tmp', 'shell-supervisor', 'supervisor.log');
 const watchDirs = [
-  path.join(distDir, 'shell', 'supervisor'),
-  path.join(distDir, 'shell', 'ipc'),
-  path.join(distDir, 'shell', 'core'),
+  path.join(shellDir, 'supervisor'),
+  path.join(shellDir, 'ipc'),
+  path.join(shellDir, 'core'),
+  sharedDir,
 ];
 const gracefulShutdownMs = 2000;
-const fileCheckMs = 250;
 
 let child = null;
 let shuttingDown = false;
@@ -43,24 +46,12 @@ function resolveLogFile() {
   return defaultLogFile;
 }
 
-function waitForBuild() {
-  if (fs.existsSync(supervisorEntry)) return Promise.resolve();
-  log('waiting for dist\\shell\\supervisor\\index.js...');
-  return new Promise((resolve) => {
-    const timer = setInterval(() => {
-      if (!fs.existsSync(supervisorEntry)) return;
-      clearInterval(timer);
-      resolve();
-    }, fileCheckMs);
-  });
-}
-
 function startSupervisor() {
   if (shuttingDown || child) return;
   const logFile = resolveLogFile();
   const logLevel = process.env.SHELL_LOG_LEVEL || 'info';
   log(`starting supervisor (log level=${logLevel}, log file=${logFile || '<stderr only>'})`);
-  child = spawn(process.execPath, [supervisorEntry], {
+  child = spawn(process.execPath, [tsxCli, '--tsconfig', tsconfigFile, supervisorEntry], {
     cwd: projectRoot,
     stdio: 'inherit',
     env: {
@@ -87,7 +78,7 @@ function watchForSupervisorChanges() {
     const w = fs.watch(dir, { recursive: true }, (_eventType, fileName) => {
       if (!fileName) return;
       const f = String(fileName);
-      if (!(f.endsWith('.js') || f.endsWith('.json'))) return;
+      if (!(f.endsWith('.ts') || f.endsWith('.json'))) return;
       if (!warned) {
         warned = true;
         log('--- supervisor source changed; restart it manually to apply (Ctrl-C and rerun shell:dev or `npm run shell`) ---');
@@ -127,7 +118,6 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 (async () => {
-  await waitForBuild();
   watchForSupervisorChanges();
   startSupervisor();
 })().catch((err) => {

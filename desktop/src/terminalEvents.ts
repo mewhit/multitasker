@@ -1,1 +1,1 @@
-export * from '../../shared/terminalEvents';
+export * from "../../shared/terminalEvents.js";

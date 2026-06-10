@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Multitasker monorepo",
-  "main": "dist/desktop/main.js",
+  "main": "dist/desktop/src/main.js",
   "scripts": {
     "install:apps": "npm install --prefix desktop && npm install --prefix http-server && npm install --prefix shell && npm install --prefix ws-server",
     "clean:debug-log": "node scripts\\clean-debug-log.js",

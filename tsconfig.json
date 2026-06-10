@@ -42,7 +42,7 @@
                 ],
     "exclude":  [
                     "node_modules",
-                    "desktop/renderer",
+                    "desktop/src/renderer",
                     "desktop/vite.config.ts"
                 ]
 }

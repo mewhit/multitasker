@@ -846,3 +846,14 @@ html, body, #root {
   display: flex;
   flex-direction: column;
 }
+
+@media (max-width: 480px) {
+  #session-detail {
+    display: none !important;
+  }
+  #sidebar {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+  }
+}

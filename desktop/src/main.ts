@@ -44,7 +44,7 @@ import type { TerminalCaptureState, TerminalEvent, TerminalEventType } from './t
 
 const WINDOW_WIDTH = 1280;
 const WINDOW_HEIGHT = 800;
-const WINDOW_MIN_WIDTH = 960;
+const WINDOW_MIN_WIDTH = 280;
 const WINDOW_MIN_HEIGHT = 600;
 const WINDOW_STATE_SAVE_DEBOUNCE_MS = 500;
 const MIN_VISIBLE_WINDOW_AREA = 100;

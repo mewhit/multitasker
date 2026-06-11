@@ -107,6 +107,7 @@ export interface ManualTask {
   id: string;
   text: string;
   createdAt: number;
+  priority?: number;
 }
 
 export type RecurringTaskFrequency = 'weekly' | 'daily' | 'interval' | 'monthly';
@@ -128,6 +129,7 @@ export interface RecurringTask {
   dayOfMonth?: number;
   anchorDate?: string;
   createdAt: number;
+  priority?: number;
   enabled: boolean;
   lastGeneratedDate?: string;
 }
@@ -176,8 +178,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getManualTasks: (): Promise<ManualTask[]> =>
     ipcRenderer.invoke('manual-task:list'),
 
-  addManualTask: (text: string, createdAt?: number): Promise<ManualTask | null> =>
-    ipcRenderer.invoke('manual-task:add', text, createdAt),
+  addManualTask: (text: string, createdAt?: number, priority?: number): Promise<ManualTask | null> =>
+    ipcRenderer.invoke('manual-task:add', text, createdAt, priority),
 
   removeManualTask: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('manual-task:remove', id),
@@ -189,8 +191,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecurringTasks: (): Promise<RecurringTask[]> =>
     ipcRenderer.invoke('recurring-task:list'),
 
-  addRecurringTask: (text: string, time: string, schedule: RecurringTaskSchedule | number[]): Promise<RecurringTask | null> =>
-    ipcRenderer.invoke('recurring-task:add', text, time, schedule),
+  addRecurringTask: (text: string, time: string, schedule: RecurringTaskSchedule | number[], priority?: number): Promise<RecurringTask | null> =>
+    ipcRenderer.invoke('recurring-task:add', text, time, schedule, priority),
 
   removeRecurringTask: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('recurring-task:remove', id),

@@ -1,1 +1,1 @@
-export * from '../../shared/shell-constants';
+export * from '../../shared-shell/shell-constants';

@@ -99,6 +99,7 @@ export interface ManualTaskState {
   id: string;
   text: string;
   createdAt: number;
+  priority?: number;
 }
 
 export type RecurringTaskFrequency = 'weekly' | 'daily' | 'interval' | 'monthly';
@@ -113,6 +114,7 @@ export interface RecurringTaskState {
   dayOfMonth?: number;
   anchorDate?: string;
   createdAt: number;
+  priority?: number;
   enabled: boolean;
   lastGeneratedDate?: string;
 }
@@ -329,7 +331,10 @@ function normalizeManualTask(value: unknown): ManualTaskState | null {
   const createdAt = readFiniteNumber(value, 'createdAt');
   if (!id || !text || createdAt === null) return null;
 
-  return { id, text, createdAt };
+  const task: ManualTaskState = { id, text, createdAt };
+  const priority = normalizeTaskPriority(value['priority'] ?? value['priorityRank']);
+  if (priority !== undefined) task.priority = priority;
+  return task;
 }
 
 function normalizeRecurringTask(value: unknown): RecurringTaskState | null {
@@ -354,6 +359,8 @@ function normalizeRecurringTask(value: unknown): RecurringTaskState | null {
     createdAt,
     enabled: value['enabled'] !== false,
   };
+  const priority = normalizeTaskPriority(value['priority'] ?? value['priorityRank']);
+  if (priority !== undefined) task.priority = priority;
   if (frequency === 'daily' && task.daysOfWeek.length === 0) task.daysOfWeek = [0, 1, 2, 3, 4, 5, 6];
 
   if (frequency === 'interval') {
@@ -409,6 +416,14 @@ function getLocalDateKey(date: Date): string {
 
 function isRecurringTime(value: string): boolean {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+export function normalizeTaskPriority(value: unknown): number | undefined {
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function normalizeWindowState(value: unknown): WindowState | null {

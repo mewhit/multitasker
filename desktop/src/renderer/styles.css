@@ -247,6 +247,15 @@
         text-transform: uppercase;
         letter-spacing: 0.4px;
       }
+      .task-priority-badge {
+        border: 1px solid rgba(210, 153, 34, 0.42);
+        border-radius: 999px;
+        color: var(--yellow);
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 5px;
+        white-space: nowrap;
+      }
       .manual-task-time {
         color: var(--text-dim);
         font-size: 11px;

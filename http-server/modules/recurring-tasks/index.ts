@@ -30,7 +30,8 @@ export const recurringTasksModule: HttpModule = {
           const task = createRecurringTask(
             readPayloadValue(payload, 'text'),
             readPayloadValue(payload, 'time'),
-            readPayloadValue(payload, 'schedule') ?? readPayloadValue(payload, 'recurrence') ?? readPayloadValue(payload, 'daysOfWeek')
+            readPayloadValue(payload, 'schedule') ?? readPayloadValue(payload, 'recurrence') ?? readPayloadValue(payload, 'daysOfWeek'),
+            readPayloadValue(payload, 'priority') ?? readPayloadValue(payload, 'priorityRank')
           );
           if (!task) {
             writeJsonResponse(response, 400, { ok: false, error: 'invalid_recurring_task' });

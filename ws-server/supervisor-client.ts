@@ -1,15 +1,15 @@
 import { EventEmitter } from 'events';
 import * as net from 'net';
-import { AUTH_TOKEN } from '../shared/shell-constants';
+import { AUTH_TOKEN } from '../shared-shell/shell-constants';
 import { log } from './logger';
-import type { SessionInfo, SshConnectOptions } from '../shared/shell-protocol';
+import type { SessionInfo, SshConnectOptions } from '../shared-shell/shell-protocol';
 import {
   IPC_MAX_LINE_BYTES,
   NdjsonLineBuffer,
   parseIpcServerMessage,
   type IpcClientMessage,
   type IpcServerMessage,
-} from '../shared/shell-ipc-protocol';
+} from '../shared-shell/shell-ipc-protocol';
 
 const CONNECT_RETRY_MIN_MS = 100;
 const CONNECT_RETRY_MAX_MS = 2000;

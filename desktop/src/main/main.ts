@@ -37,6 +37,7 @@ import {
   LocalShellType,
   loadWindowState,
   saveWindowState,
+  normalizeTaskPriority,
   type WindowState,
 } from "../settings";
 import type { TerminalCaptureState, TerminalEvent, TerminalEventType } from "../terminalEvents";
@@ -1054,7 +1055,7 @@ function findSessionForTerminalIdentity(identity: TerminalEventIdentity): Sessio
   );
 }
 
-function createManualTask(textValue: unknown, createdAtValue?: unknown): ManualTaskState | null {
+function createManualTask(textValue: unknown, createdAtValue?: unknown, priorityValue?: unknown): ManualTaskState | null {
   const text = typeof textValue === "string" ? textValue.trim() : "";
   if (!text) {
     console.error("Failed to add manual task: task text is required");
@@ -1062,12 +1063,19 @@ function createManualTask(textValue: unknown, createdAtValue?: unknown): ManualT
   }
 
   const createdAt = typeof createdAtValue === "number" && Number.isFinite(createdAtValue) ? createdAtValue : Date.now();
+  const priority = readOptionalTaskPriority(priorityValue);
+  if (priority === null) {
+    console.error("Failed to add manual task: invalid priority");
+    return null;
+  }
 
-  return addManualTask({
+  const task: ManualTaskState = {
     id: `manual-${randomUUID()}`,
     text: truncateManualTaskText(text),
     createdAt,
-  });
+  };
+  if (priority !== undefined) task.priority = priority;
+  return addManualTask(task);
 }
 
 function readManualTaskText(payload: unknown): string {
@@ -1075,6 +1083,17 @@ function readManualTaskText(payload: unknown): string {
   if (typeof payload !== "object" || payload === null) return "";
   const record = payload as Record<string, unknown>;
   return readStringField(record, "text") || readStringField(record, "title") || readStringField(record, "task");
+}
+
+function readManualTaskPriority(payload: unknown): number | undefined | null {
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const record = payload as Record<string, unknown>;
+  return readOptionalTaskPriority(record["priority"] ?? record["priorityRank"]);
+}
+
+function readOptionalTaskPriority(value: unknown): number | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  return normalizeTaskPriority(value) ?? null;
 }
 
 function addManualTask(task: ManualTaskState): ManualTaskState {
@@ -1112,7 +1131,12 @@ function truncateManualTaskText(text: string): string {
   return `${text.slice(0, MAX_MANUAL_TASK_TEXT_LENGTH - 1)}â€¦`;
 }
 
-function createRecurringTask(textValue: unknown, timeValue: unknown, scheduleValue: unknown): RecurringTaskState | null {
+function createRecurringTask(
+  textValue: unknown,
+  timeValue: unknown,
+  scheduleValue: unknown,
+  priorityValue?: unknown,
+): RecurringTaskState | null {
   const text = typeof textValue === "string" ? textValue.trim() : "";
   const time = typeof timeValue === "string" ? timeValue.trim() : "";
   const schedule = parseRecurringSchedule(scheduleValue);
@@ -1128,6 +1152,11 @@ function createRecurringTask(textValue: unknown, timeValue: unknown, scheduleVal
     console.error("Failed to add recurring task: invalid recurrence schedule");
     return null;
   }
+  const priority = readOptionalTaskPriority(priorityValue);
+  if (priority === null) {
+    console.error("Failed to add recurring task: invalid priority");
+    return null;
+  }
 
   const now = new Date();
   const task: RecurringTaskState = {
@@ -1139,6 +1168,7 @@ function createRecurringTask(textValue: unknown, timeValue: unknown, scheduleVal
     createdAt: now.getTime(),
     enabled: true,
   };
+  if (priority !== undefined) task.priority = priority;
   if (schedule.intervalDays !== undefined) task.intervalDays = schedule.intervalDays;
   if (schedule.dayOfMonth !== undefined) task.dayOfMonth = schedule.dayOfMonth;
   if (schedule.anchorDate) task.anchorDate = schedule.anchorDate;
@@ -1258,7 +1288,7 @@ function runDueRecurringTasks(now = new Date()): void {
     if (!isRecurringTaskDue(task, now)) continue;
     if (task.lastGeneratedDate === today) continue;
 
-    if (createManualTask(task.text)) {
+    if (createManualTask(task.text, undefined, task.priority)) {
       task.lastGeneratedDate = today;
       changed = true;
     }
@@ -2281,7 +2311,7 @@ async function handleTerminalUpdateHttpRequest(request: IncomingMessage, respons
   }
 
   if (isTaskApiPath) {
-    const task = createManualTask(readManualTaskText(parsedPayload));
+    const task = createManualTask(readManualTaskText(parsedPayload), undefined, readManualTaskPriority(parsedPayload));
     if (!task) {
       writeJsonResponse(response, 400, { ok: false, error: "invalid_manual_task" });
       return;
@@ -2447,7 +2477,9 @@ function setupLegacyIpc(): void {
 
   ipcMain.handle("manual-task:list", () => manualTasks.map((task) => ({ ...task })));
 
-  ipcMain.handle("manual-task:add", (_event, text: unknown, createdAt?: unknown) => createManualTask(text, createdAt));
+  ipcMain.handle("manual-task:add", (_event, text: unknown, createdAt?: unknown, priority?: unknown) =>
+    createManualTask(text, createdAt, priority),
+  );
 
   ipcMain.handle("manual-task:remove", async (_event, id: unknown) => {
     if (typeof id !== "string" || !id.trim()) {
@@ -2470,8 +2502,8 @@ function setupLegacyIpc(): void {
 
   ipcMain.handle("recurring-task:list", () => recurringTasks.map(cloneRecurringTask));
 
-  ipcMain.handle("recurring-task:add", (_event, text: unknown, time: unknown, schedule: unknown) =>
-    createRecurringTask(text, time, schedule),
+  ipcMain.handle("recurring-task:add", (_event, text: unknown, time: unknown, schedule: unknown, priority?: unknown) =>
+    createRecurringTask(text, time, schedule, priority),
   );
 
   ipcMain.handle("recurring-task:remove", async (_event, id: unknown) => {

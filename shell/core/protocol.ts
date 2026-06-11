@@ -1,1 +1,1 @@
-export * from '../../shared/shell-protocol';
+export * from '../../shared-shell/shell-protocol';

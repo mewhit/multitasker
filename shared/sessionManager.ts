@@ -9,7 +9,7 @@ export type SessionStatus = 'waiting' | 'starting' | 'running' | 'needs_attentio
 
 /**
  * Metadata about the client (terminal host) that owns a session. Mirrors the
- * shell gateway client metadata shape exposed from shared/shell-protocol.
+ * shell gateway client metadata shape exposed from shared-shell/shell-protocol.
  */
 export type ClientMetadata = {
   kind: 'vscode';

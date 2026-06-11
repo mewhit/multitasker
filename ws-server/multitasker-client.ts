@@ -1,6 +1,6 @@
 import * as http from 'http';
 import { URL } from 'url';
-import type { ClientMetadata } from '../shared/shell-protocol';
+import type { ClientMetadata } from '../shared-shell/shell-protocol';
 import { log } from './logger';
 
 export interface CreateSessionRequest {

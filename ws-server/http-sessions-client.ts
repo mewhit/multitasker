@@ -4,7 +4,7 @@ import { log } from './logger';
 
 /**
  * Desktop session info from HTTP-server.
- * This is different from shared/shell-protocol.ts#SessionInfo
+ * This is different from shared-shell/shell-protocol.ts#SessionInfo
  * (which is for PTY/SSH sessions in the supervisor).
  */
 export interface DesktopSessionInfo {

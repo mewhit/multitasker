@@ -1,1 +1,1 @@
-export * from '../../shared/shell-ipc-pipe';
+export * from '../../shared-shell/shell-ipc-pipe';

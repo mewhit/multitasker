@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ManualTaskState } from '../../../shared/settings';
-import { saveManualTasks } from '../../../shared/settings';
+import { normalizeTaskPriority, saveManualTasks } from '../../../shared/settings';
 import { manualTasks } from '../../state/tasks';
 import { MAX_MANUAL_TASKS } from '../../core/constants';
 import { truncateTaskText } from '../../utils/date';
@@ -8,15 +8,20 @@ import { cloneManualTask } from '../../utils/clone';
 import { readStringField, readOptionalNumberField } from '../../utils/payload';
 import { broadcastManualTasks } from './broadcast';
 
-export function createManualTask(textValue: unknown): ManualTaskState | null {
+export function createManualTask(textValue: unknown, priorityValue?: unknown): ManualTaskState | null {
   const text = typeof textValue === 'string' ? textValue.trim() : '';
   if (!text) return null;
 
-  return storeManualTask({
+  const priority = readOptionalTaskPriority(priorityValue);
+  if (priority === null) return null;
+
+  const task: ManualTaskState = {
     id: `manual-${randomUUID()}`,
     text: truncateTaskText(text),
     createdAt: Date.now(),
-  });
+  };
+  if (priority !== undefined) task.priority = priority;
+  return storeManualTask(task);
 }
 
 export function parseManualTaskAddRequest(payload: unknown): ManualTaskState | null {
@@ -31,11 +36,16 @@ export function parseManualTaskAddRequest(payload: unknown): ManualTaskState | n
   const createdAt = record ? readOptionalNumberField(record, 'createdAt') ?? Date.now() : Date.now();
   if (!Number.isFinite(createdAt)) return null;
 
-  return {
+  const priority = record ? readOptionalTaskPriority(record['priority'] ?? record['priorityRank']) : undefined;
+  if (priority === null) return null;
+
+  const task: ManualTaskState = {
     id,
     text: truncateTaskText(text),
     createdAt,
   };
+  if (priority !== undefined) task.priority = priority;
+  return task;
 }
 
 export function storeManualTask(task: ManualTaskState): ManualTaskState {
@@ -56,4 +66,9 @@ export function removeManualTask(id: string): boolean {
   saveManualTasks(manualTasks);
   broadcastManualTasks();
   return true;
+}
+
+function readOptionalTaskPriority(value: unknown): number | undefined | null {
+  if (value === undefined || value === null || value === '') return undefined;
+  return normalizeTaskPriority(value) ?? null;
 }

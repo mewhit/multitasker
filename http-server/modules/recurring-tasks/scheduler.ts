@@ -28,7 +28,7 @@ export function runDueRecurringTasks(now = new Date()): void {
     if (!isRecurringTaskDue(task, now)) continue;
     if (task.lastGeneratedDate === today) continue;
 
-    if (createManualTask(task.text)) {
+    if (createManualTask(task.text, task.priority)) {
       task.lastGeneratedDate = today;
       changed = true;
     }

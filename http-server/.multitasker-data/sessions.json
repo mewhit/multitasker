@@ -1,6 +1,19 @@
 [
   {
-    "id": "9ff062ac-a48c-49f6-b558-d7a6c14e2696",
+    "id": "14224c87-ff5b-4382-b391-f38cdf2ca45c",
+    "name": "server",
+    "cmd": "",
+    "cwd": "C:\\dev\\happyhead\\backoffice\\server",
+    "shellType": "powershell",
+    "clientMetadata": {
+      "kind": "vscode",
+      "workspace": "C:\\dev\\happyhead\\backoffice\\server",
+      "version": "1.122.1",
+      "termProgram": "vscode"
+    }
+  },
+  {
+    "id": "6a987172-9e35-4726-8d40-d88b966d3083",
     "name": "erp",
     "cmd": "",
     "cwd": "C:\\dev\\erp",
@@ -8,7 +21,20 @@
     "clientMetadata": {
       "kind": "vscode",
       "workspace": "C:\\dev\\erp",
-      "version": "1.120.0",
+      "version": "1.122.1",
+      "termProgram": "vscode"
+    }
+  },
+  {
+    "id": "ba62be1b-70cf-4ebf-90fa-800116e5a126",
+    "name": "server",
+    "cmd": "",
+    "cwd": "C:\\dev\\happyhead\\backoffice\\server",
+    "shellType": "powershell",
+    "clientMetadata": {
+      "kind": "vscode",
+      "workspace": "C:\\dev\\happyhead\\backoffice\\server",
+      "version": "1.122.1",
       "termProgram": "vscode"
     }
   }

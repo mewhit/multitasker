@@ -7,3 +7,4 @@ debug-log/
 .DS_Store
 Thumbs.db
 dist/
+http-server/.multitasker-data/sessions.json

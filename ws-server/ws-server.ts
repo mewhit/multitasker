@@ -10,7 +10,7 @@ import {
   PORT,
   PROTOCOL_VERSION,
   defaultShell,
-} from '../shared/shell-constants';
+} from '../shared-shell/shell-constants';
 import { log } from './logger';
 import {
   MULTITASKER_BACKEND_URL,
@@ -23,7 +23,7 @@ import {
   type ClientMessage,
   type ErrorCode,
   type ServerMessage,
-} from '../shared/shell-protocol';
+} from '../shared-shell/shell-protocol';
 import { SupervisorClient } from './supervisor-client';
 import { OutputAnalyzer, debugLogAgentStatus, type AgentStatusChange } from './output-analyzer';
 import {

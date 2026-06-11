@@ -38,7 +38,8 @@
                     "http-server/**/*.ts",
                     "shell/**/*.ts",
                     "ws-server/**/*.ts",
-                    "shared/**/*.ts"
+                    "shared/**/*.ts",
+                    "shared-shell/**/*.ts"
                 ],
     "exclude":  [
                     "node_modules",

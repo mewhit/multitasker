@@ -1,1 +1,1 @@
-export * from '../../shared/shell-ipc-protocol';
+export * from '../../shared-shell/shell-ipc-protocol';

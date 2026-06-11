@@ -1,0 +1,15 @@
+[
+  {
+    "id": "9ff062ac-a48c-49f6-b558-d7a6c14e2696",
+    "name": "erp",
+    "cmd": "",
+    "cwd": "C:\\dev\\erp",
+    "shellType": "powershell",
+    "clientMetadata": {
+      "kind": "vscode",
+      "workspace": "C:\\dev\\erp",
+      "version": "1.120.0",
+      "termProgram": "vscode"
+    }
+  }
+]

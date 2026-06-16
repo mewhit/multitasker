@@ -8,3 +8,4 @@ debug-log/
 Thumbs.db
 dist/
 http-server/.multitasker-data/sessions.json
+http-server/.multitasker-data/next-up.json

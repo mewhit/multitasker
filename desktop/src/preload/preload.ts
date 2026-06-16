@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { NextUpItem } from '../../../shared/next-up';
 
 export type LocalShellType = 'powershell' | 'bash';
 export type ShellType = LocalShellType | 'ssh';
@@ -194,6 +195,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getSessions: (): Promise<Session[]> =>
     ipcRenderer.invoke('session:list'),
+
+  getNextUp: (): Promise<NextUpItem[]> =>
+    ipcRenderer.invoke('next-up:list'),
+
+  setNextUpOrder: (keys: string[]): Promise<NextUpItem[]> =>
+    ipcRenderer.invoke('next-up:set-order', keys),
+
+  markNextUpDone: (key: string): Promise<NextUpItem[]> =>
+    ipcRenderer.invoke('next-up:done', key),
+
+  onNextUpListUpdate: (cb: (items: NextUpItem[]) => void): void => {
+    ipcRenderer.on('next-up:list-update', (_event, items: NextUpItem[]) => cb(items));
+  },
 
   onListUpdate: (cb: (sessions: Session[]) => void): void => {
     ipcRenderer.on('session:list-update', (_event, sessions: Session[]) => cb(sessions));

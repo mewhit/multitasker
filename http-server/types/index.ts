@@ -1,5 +1,6 @@
 import type { Session, TerminalBinding } from '../../shared/sessionManager';
-import type { ShellType, SlackNotificationState, ManualTaskState, RecurringTaskState } from '../../shared/settings';
+import type { ShellType, SlackNotificationState, ManualTaskState, RecurringTaskState, GoogleCalendarEventState } from '../../shared/settings';
+import type { NextUpItem } from '../../shared/next-up';
 
 export type SlackNotificationPriorityLabel = NonNullable<SlackNotificationState['priorityLabel']>;
 
@@ -62,6 +63,8 @@ export interface BackendState {
   manualTasks: ManualTaskState[];
   recurringTasks: RecurringTaskState[];
   slackNotifications: SlackNotificationState[];
+  googleCalendarEvents: GoogleCalendarEventState[];
+  nextUp: NextUpItem[];
 }
 
 export interface GoogleCalendarOAuthConfig {

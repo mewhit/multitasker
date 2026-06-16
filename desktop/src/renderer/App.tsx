@@ -13,6 +13,7 @@ declare global {
     electronAPI: any;
     __MULTITASKER_RENDERER_INITIALIZED__?: boolean;
     __MULTITASKER_DONE_FALLBACK_CLEANUP__?: () => void;
+    __MULTITASKER_NEXT_UP_SUBSCRIBED__?: boolean;
     FitAddon?: { FitAddon: typeof FitAddon };
     WebglAddon?: { WebglAddon: typeof WebglAddon };
     Unicode11Addon?: { Unicode11Addon: typeof Unicode11Addon };
@@ -47,6 +48,14 @@ function installNextUpDoneFallback(): () => void {
   let contextKey = '';
   let contextCard: HTMLElement | null = null;
 
+  void window.electronAPI.getNextUp?.().then(applyServerNextUpOrder).catch((error: unknown) => {
+    console.error(error);
+  });
+  if (!window.__MULTITASKER_NEXT_UP_SUBSCRIBED__) {
+    window.__MULTITASKER_NEXT_UP_SUBSCRIBED__ = true;
+    window.electronAPI.onNextUpListUpdate?.(applyServerNextUpOrder);
+  }
+
   const rememberContextCard = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
     const card = event.target.closest('.next-up-card');
@@ -60,6 +69,11 @@ function installNextUpDoneFallback(): () => void {
     if (!event.target.closest('#btn-next-up-done')) return;
     const key = contextKey;
     const card = contextCard;
+    if (key.startsWith('calendar:')) {
+      void window.electronAPI.markNextUpDone?.(key).catch((error: unknown) => {
+        console.error(error);
+      });
+    }
     window.setTimeout(() => {
       const visibleCard = getVisibleNextUpCard(key, card);
       if (!visibleCard) return;
@@ -67,14 +81,31 @@ function installNextUpDoneFallback(): () => void {
         console.error(error);
       });
       visibleCard.remove();
+      persistVisibleNextUpOrder();
     }, 0);
+  };
+
+  const handleMoveClick = (event: MouseEvent): void => {
+    if (!(event.target instanceof Element)) return;
+    if (!event.target.closest('#btn-next-up-move-up') && !event.target.closest('#btn-next-up-move-down')) return;
+    window.setTimeout(persistVisibleNextUpOrder, 0);
+  };
+
+  const handleDrop = (event: DragEvent): void => {
+    if (!(event.target instanceof Element)) return;
+    if (!event.target.closest('.next-up-card')) return;
+    window.setTimeout(persistVisibleNextUpOrder, 0);
   };
 
   document.addEventListener('contextmenu', rememberContextCard, true);
   document.addEventListener('click', handleDoneClick, true);
+  document.addEventListener('click', handleMoveClick, true);
+  document.addEventListener('drop', handleDrop, true);
   return () => {
     document.removeEventListener('contextmenu', rememberContextCard, true);
     document.removeEventListener('click', handleDoneClick, true);
+    document.removeEventListener('click', handleMoveClick, true);
+    document.removeEventListener('drop', handleDrop, true);
   };
 }
 
@@ -93,5 +124,29 @@ async function removeNextUpItem(key: string): Promise<void> {
     await api.removeManualTask?.(key.slice('manual:'.length));
   } else if (key.startsWith('session:')) {
     await api.removeSession?.(key.slice('session:'.length));
+  }
+}
+
+function persistVisibleNextUpOrder(): void {
+  const keys = [...document.querySelectorAll<HTMLElement>('.next-up-card')]
+    .map((card) => card.dataset.nextUpKey || '')
+    .filter(Boolean);
+  if (keys.length === 0) return;
+  void window.electronAPI.setNextUpOrder?.(keys).catch((error: unknown) => {
+    console.error(error);
+  });
+}
+
+function applyServerNextUpOrder(items: Array<{ key?: string }>): void {
+  const container = document.getElementById('session-list');
+  if (!container || !Array.isArray(items)) return;
+  const cardsByKey = new Map(
+    [...container.querySelectorAll<HTMLElement>('.next-up-card')]
+      .map((card) => [card.dataset.nextUpKey || '', card] as const)
+      .filter(([key]) => key)
+  );
+  for (const item of items) {
+    const card = item.key ? cardsByKey.get(item.key) : undefined;
+    if (card) container.appendChild(card);
   }
 }

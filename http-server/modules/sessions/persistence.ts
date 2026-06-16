@@ -3,10 +3,11 @@ import {
   loadManualTasks,
   loadRecurringTasks,
   loadSlackNotifications,
+  loadGoogleCalendarEvents,
 } from '../../../shared/settings';
 import { sessionManager, taskIdByTerminalRef, multitaskerSessionIdByShellSessionId } from '../../state/sessions';
-import { manualTasks, recurringTasks, slackNotifications } from '../../state/tasks';
-import { MAX_MANUAL_TASKS, MAX_RECURRING_TASKS, MAX_SLACK_NOTIFICATIONS } from '../../core/constants';
+import { googleCalendarEvents, manualTasks, recurringTasks, slackNotifications } from '../../state/tasks';
+import { MAX_GOOGLE_CALENDAR_EVENTS, MAX_MANUAL_TASKS, MAX_RECURRING_TASKS, MAX_SLACK_NOTIFICATIONS } from '../../core/constants';
 import { isShellType } from '../../utils/types';
 import { flushPendingTerminalUpdates, flushPendingTerminalEvents } from '../terminals/apply';
 
@@ -39,6 +40,7 @@ export function restorePersistedState(): void {
   manualTasks.push(...loadManualTasks().slice(0, MAX_MANUAL_TASKS));
   recurringTasks.push(...loadRecurringTasks().slice(0, MAX_RECURRING_TASKS));
   slackNotifications.push(...loadSlackNotifications().slice(0, MAX_SLACK_NOTIFICATIONS));
+  googleCalendarEvents.push(...loadGoogleCalendarEvents().slice(0, MAX_GOOGLE_CALENDAR_EVENTS));
   flushPendingTerminalUpdates();
   flushPendingTerminalEvents();
 }

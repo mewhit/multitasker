@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { normalizeNextUpItems, type NextUpState } from './next-up';
 
 export type LocalShellType = 'powershell' | 'bash';
 export type ShellType = LocalShellType | 'ssh';
@@ -147,6 +148,8 @@ export interface SlackNotificationState {
   priorityRank?: number;
   priorityLabel?: SlackNotificationPriorityLabel;
 }
+
+export type { NextUpState };
 
 const DEFAULT_SETTINGS: AppSettings = {
   reviewTool: 'code {path}',
@@ -558,6 +561,17 @@ function normalizeGoogleCalendarEvent(value: unknown): GoogleCalendarEventState 
   return event;
 }
 
+function normalizeNextUpState(value: unknown): NextUpState {
+  if (!isRecord(value)) return getDefaultNextUpState();
+  const updatedAt = readFiniteNumber(value, 'updatedAt');
+  return {
+    order: readStringList(value, 'order'),
+    done: readStringList(value, 'done'),
+    items: normalizeNextUpItems(value['items']) ?? [],
+    updatedAt: updatedAt !== null ? updatedAt : Date.now(),
+  };
+}
+
 function isSlackNotificationPriorityLabel(value: string): value is SlackNotificationPriorityLabel {
   return value === 'mention' ||
     value === 'dm' ||
@@ -574,6 +588,15 @@ function readFiniteNumber(record: Record<string, unknown>, key: string): number 
 function readTrimmedString(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function readStringList(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((item): item is string => typeof item === 'string')
+    .map(item => item.trim())
+    .filter(Boolean))];
 }
 
 function addOptionalSlackString(
@@ -608,6 +631,10 @@ function getRecurringTasksPath(): string {
   return path.join(getStorageDirectory(), 'recurring-tasks.json');
 }
 
+function getNextUpPath(): string {
+  return path.join(getStorageDirectory(), 'next-up.json');
+}
+
 function getGoogleCalendarAuthPath(): string {
   return path.join(getStorageDirectory(), 'google-calendar-auth.json');
 }
@@ -629,6 +656,15 @@ function getStorageDirectory(): string {
 function writeJsonFile(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function getDefaultNextUpState(): NextUpState {
+  return {
+    order: [],
+    done: [],
+    items: [],
+    updatedAt: 0,
+  };
 }
 
 function deleteJsonFile(filePath: string): void {
@@ -701,6 +737,19 @@ export function loadRecurringTasks(): RecurringTaskState[] {
 
 export function saveRecurringTasks(tasks: RecurringTaskState[]): void {
   writeJsonFile(getRecurringTasksPath(), tasks.map(normalizeRecurringTask).filter(Boolean));
+}
+
+export function loadNextUpState(): NextUpState {
+  try {
+    const raw = fs.readFileSync(getNextUpPath(), 'utf-8');
+    return normalizeNextUpState(JSON.parse(raw));
+  } catch {
+    return getDefaultNextUpState();
+  }
+}
+
+export function saveNextUpState(state: NextUpState): void {
+  writeJsonFile(getNextUpPath(), normalizeNextUpState(state));
 }
 
 export function loadSlackNotifications(): SlackNotificationState[] {

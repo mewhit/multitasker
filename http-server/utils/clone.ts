@@ -1,4 +1,4 @@
-import type { ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../shared/settings';
+import type { GoogleCalendarEventState, ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../shared/settings';
 
 export function cloneManualTask(task: ManualTaskState): ManualTaskState {
   return { ...task };
@@ -14,4 +14,8 @@ export function cloneRecurringTask(task: RecurringTaskState): RecurringTaskState
 
 export function cloneSlackNotification(notification: SlackNotificationState): SlackNotificationState {
   return { ...notification };
+}
+
+export function cloneGoogleCalendarEvent(event: GoogleCalendarEventState): GoogleCalendarEventState {
+  return { ...event };
 }

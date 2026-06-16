@@ -9,6 +9,15 @@ import { WebSocket } from "ws";
 import { SessionManager, type Session, type SessionStatus, type TerminalBinding, type TerminalUpdate } from "../sessionManager";
 import { createShellPty as spawnShellPty, createShellSsh as spawnShellSsh, killShellSession } from "../shellServerClient";
 import {
+  createNextUpState,
+  createNextUpStateWithDoneKey,
+  createNextUpStateWithOrder,
+  normalizeNextUpItems,
+  type NextUpInput,
+  type NextUpItem,
+  type NextUpState,
+} from "../../../shared/next-up";
+import {
   loadSettings,
   saveSettings,
   setStorageDirectory,
@@ -22,6 +31,8 @@ import {
   normalizeSlackNotification,
   loadRecurringTasks,
   saveRecurringTasks,
+  loadNextUpState,
+  saveNextUpState,
   clearGoogleCalendarAuth,
   loadGoogleCalendarConnections,
   saveGoogleCalendarConnections,
@@ -196,6 +207,7 @@ let backendTaskSocketAuthDisabled = false;
 let backendTaskSocketLastWarning = "";
 let slackAuthProcess: ReturnType<typeof spawn> | null = null;
 let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let standaloneBackendNextUp: NextUpItem[] | null = null;
 const pendingTerminalUpdates = new Map<string, TerminalUpdate>();
 const pendingTerminalEvents = new Map<string, TerminalEvent[]>();
 const taskIdByTerminalRef = new Map<string, string>();
@@ -421,6 +433,51 @@ function cloneSession(session: Session): Session {
     ...(session.sshOptions ? { sshOptions: { ...session.sshOptions } } : {}),
     ...(session.clientMetadata ? { clientMetadata: { ...session.clientMetadata } } : {}),
   };
+}
+
+function getCurrentNextUpItems(): NextUpItem[] {
+  const computed = getCurrentNextUpState(!standaloneBackendNextUp).items;
+  if (!standaloneBackendNextUp) return computed;
+
+  const itemsByKey = new Map(standaloneBackendNextUp.map((item) => [item.key, item]));
+  for (const item of computed) {
+    if (item.source === "google-calendar") itemsByKey.set(item.key, item);
+  }
+  return [...itemsByKey.values()];
+}
+
+function getCurrentNextUpState(persist: boolean): NextUpState {
+  const state = createNextUpState(getCurrentNextUpInput(), persist ? loadNextUpState() : {});
+  if (persist) saveNextUpStateIfChanged(state);
+  return state;
+}
+
+function getCurrentNextUpInput(): NextUpInput {
+  return {
+    sessions: getCurrentSessions(),
+    manualTasks,
+    slackNotifications,
+    googleCalendarEvents,
+  };
+}
+
+function saveNextUpStateIfChanged(nextState: NextUpState): void {
+  const previousState = loadNextUpState();
+  if (
+    JSON.stringify(previousState.order) !== JSON.stringify(nextState.order) ||
+    JSON.stringify(previousState.done) !== JSON.stringify(nextState.done) ||
+    JSON.stringify(previousState.items) !== JSON.stringify(nextState.items)
+  ) {
+    saveNextUpState(nextState);
+  }
+}
+
+function broadcastNextUp(): void {
+  mainWindow?.webContents.send("next-up:list-update", getCurrentNextUpItems());
+}
+
+function invalidateStandaloneBackendNextUp(): void {
+  standaloneBackendNextUp = null;
 }
 
 function startStandaloneBackendSync(): void {
@@ -689,6 +746,8 @@ function applyStandaloneBackendEvent(eventName: string, payload: unknown): void 
     applyStandaloneBackendSlackNotification(payload);
   } else if (eventName === "recurring-task:list-update") {
     applyStandaloneBackendRecurringTasks(payload);
+  } else if (eventName === "next-up:list-update") {
+    applyStandaloneBackendNextUp(payload);
   }
 }
 
@@ -698,6 +757,11 @@ function applyStandaloneBackendState(payload: unknown): void {
   applyStandaloneBackendManualTasks(payload["manualTasks"]);
   applyStandaloneBackendSlackNotifications(payload["slackNotifications"]);
   applyStandaloneBackendRecurringTasks(payload["recurringTasks"]);
+  if (payload["nextUp"] !== undefined) {
+    applyStandaloneBackendNextUp(payload["nextUp"]);
+  } else {
+    broadcastNextUp();
+  }
 }
 
 function applyStandaloneBackendSessions(payload: unknown): void {
@@ -707,6 +771,8 @@ function applyStandaloneBackendSessions(payload: unknown): void {
   standaloneBackendSessions = sessions.map(cloneSession);
   syncBackendTerminalRefs(standaloneBackendSessions);
   mainWindow?.webContents.send("session:list-update", standaloneBackendSessions.map(cloneSession));
+  invalidateStandaloneBackendNextUp();
+  broadcastNextUp();
 }
 
 function applyStandaloneBackendManualTasks(payload: unknown): void {
@@ -714,6 +780,7 @@ function applyStandaloneBackendManualTasks(payload: unknown): void {
   if (!tasks) return;
 
   manualTasks.splice(0, manualTasks.length, ...tasks.map((task) => ({ ...task })));
+  invalidateStandaloneBackendNextUp();
   broadcastManualTasks();
 }
 
@@ -724,6 +791,7 @@ function applyStandaloneBackendManualTask(payload: unknown): void {
   const existingIndex = manualTasks.findIndex((existing) => existing.id === task.id);
   if (existingIndex >= 0) manualTasks.splice(existingIndex, 1);
   manualTasks.unshift({ ...task });
+  invalidateStandaloneBackendNextUp();
   broadcastManualTasks();
 }
 
@@ -732,6 +800,7 @@ function applyStandaloneBackendSlackNotifications(payload: unknown): void {
   if (!notifications) return;
 
   slackNotifications.splice(0, slackNotifications.length, ...notifications.map(cloneSlackNotification));
+  invalidateStandaloneBackendNextUp();
   broadcastSlackNotifications();
 }
 
@@ -743,6 +812,7 @@ function applyStandaloneBackendSlackNotification(payload: unknown): void {
   if (existingIndex >= 0) slackNotifications.splice(existingIndex, 1);
   slackNotifications.unshift(cloneSlackNotification(notification));
   while (slackNotifications.length > MAX_SLACK_NOTIFICATIONS) slackNotifications.pop();
+  invalidateStandaloneBackendNextUp();
   broadcastSlackNotification(notification);
 }
 
@@ -752,6 +822,53 @@ function applyStandaloneBackendRecurringTasks(payload: unknown): void {
 
   recurringTasks.splice(0, recurringTasks.length, ...tasks.map(cloneRecurringTask));
   broadcastRecurringTasks();
+}
+
+function applyStandaloneBackendNextUp(payload: unknown): void {
+  const items = normalizeNextUpItems(payload);
+  if (!items) return;
+  standaloneBackendNextUp = items.map((item) => ({ ...item }));
+  broadcastNextUp();
+}
+
+async function setNextUpOrder(keys: unknown): Promise<NextUpItem[]> {
+  const nextKeys = normalizeNextUpKeys(keys);
+  if (nextKeys.length === 0) return getCurrentNextUpItems();
+
+  if (backendEventsSyncEnabled) {
+    const response = await postStandaloneBackend("/api/next-up/order", { keys: nextKeys });
+    applyStandaloneBackendNextUp(response["nextUp"]);
+    return getCurrentNextUpItems();
+  }
+
+  const state = createNextUpStateWithOrder(getCurrentNextUpInput(), loadNextUpState(), nextKeys);
+  saveNextUpState(state);
+  broadcastNextUp();
+  return state.items;
+}
+
+async function markNextUpDone(key: unknown): Promise<NextUpItem[]> {
+  const nextKey = typeof key === "string" ? key.trim() : "";
+  if (!nextKey) return getCurrentNextUpItems();
+
+  if (backendEventsSyncEnabled) {
+    const response = await postStandaloneBackend("/api/next-up/done", { key: nextKey });
+    applyStandaloneBackendNextUp(response["nextUp"]);
+    return getCurrentNextUpItems();
+  }
+
+  const state = createNextUpStateWithDoneKey(getCurrentNextUpInput(), loadNextUpState(), nextKey);
+  saveNextUpState(state);
+  broadcastNextUp();
+  return state.items;
+}
+
+function normalizeNextUpKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean))];
 }
 
 function syncBackendTerminalRefs(sessions: Session[]): void {
@@ -974,13 +1091,16 @@ function removeStandaloneBackendSession(id: string): void {
   if (!standaloneBackendSessions) return;
   standaloneBackendSessions = standaloneBackendSessions.filter((session) => session.id !== id);
   syncBackendTerminalRefs(standaloneBackendSessions);
+  invalidateStandaloneBackendNextUp();
   mainWindow?.webContents.send("session:list-update", standaloneBackendSessions.map(cloneSession));
+  broadcastNextUp();
 }
 
 function removeStandaloneBackendManualTask(id: string): void {
   const existingIndex = manualTasks.findIndex((task) => task.id === id);
   if (existingIndex < 0) return;
   manualTasks.splice(existingIndex, 1);
+  invalidateStandaloneBackendNextUp();
   broadcastManualTasks();
 }
 
@@ -988,12 +1108,14 @@ function removeStandaloneBackendSlackNotification(id: string): void {
   const existingIndex = slackNotifications.findIndex((notification) => notification.id === id);
   if (existingIndex < 0) return;
   slackNotifications.splice(existingIndex, 1);
+  invalidateStandaloneBackendNextUp();
   broadcastSlackNotifications();
 }
 
 function clearStandaloneBackendSlackNotifications(): void {
   if (slackNotifications.length === 0) return;
   slackNotifications.length = 0;
+  invalidateStandaloneBackendNextUp();
   broadcastSlackNotifications();
 }
 
@@ -1375,6 +1497,7 @@ function broadcastManualTasks(): void {
     "manual-task:list-update",
     manualTasks.map((task) => ({ ...task })),
   );
+  broadcastNextUp();
 }
 
 function cloneSlackNotification(notification: SlackNotificationState): SlackNotificationState {
@@ -1387,6 +1510,7 @@ function broadcastSlackNotification(notification: SlackNotificationState): void 
 
 function broadcastSlackNotifications(): void {
   mainWindow?.webContents.send("slack:list-update", slackNotifications.map(cloneSlackNotification));
+  broadcastNextUp();
 }
 
 function removeSlackNotification(id: string): boolean {
@@ -1799,6 +1923,7 @@ function cloneGoogleCalendarEvent(event: GoogleCalendarEventState): GoogleCalend
 
 function broadcastGoogleCalendarEvents(): void {
   mainWindow?.webContents.send("google-calendar:list-update", googleCalendarEvents.map(cloneGoogleCalendarEvent));
+  broadcastNextUp();
 }
 
 function broadcastGoogleCalendarStatus(message = ""): GoogleCalendarStatus {
@@ -3055,6 +3180,10 @@ function setupLegacyIpc(): void {
     return getCurrentSessions();
   });
 
+  ipcMain.handle("next-up:list", () => getCurrentNextUpItems());
+  ipcMain.handle("next-up:set-order", (_event, keys: unknown) => setNextUpOrder(keys));
+  ipcMain.handle("next-up:done", (_event, key: unknown) => markNextUpDone(key));
+
   ipcMain.handle("session:open-review", (_e, cwd: string) => {
     const settings = loadSettings();
     const cmd = settings.reviewTool.replace("{path}", `"${cwd}"`);
@@ -3594,6 +3723,7 @@ function createWindow(): void {
   sessionManager?.on("sessionUpdate", (sessions: unknown) => {
     if (backendEventsSyncEnabled && standaloneBackendSessions) return;
     mainWindow?.webContents.send("session:list-update", sessions);
+    broadcastNextUp();
   });
 
   mainWindow.on("focus", () => {

@@ -1,8 +1,9 @@
-import type { ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../shared/settings';
+import type { GoogleCalendarEventState, ManualTaskState, RecurringTaskState, SlackNotificationState } from '../../shared/settings';
 
 export const manualTasks: ManualTaskState[] = [];
 export const recurringTasks: RecurringTaskState[] = [];
 export const slackNotifications: SlackNotificationState[] = [];
+export const googleCalendarEvents: GoogleCalendarEventState[] = [];
 
 let recurringTaskTimer: ReturnType<typeof setInterval> | null = null;
 

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import type { SlackNotificationState } from '../../../shared/settings';
 import { saveSlackNotifications } from '../../../shared/settings';
-import { getBackendState } from '../../core/backend-state';
+import { getBackendNextUpItems, getBackendState } from '../../core/backend-state';
 import { broadcastSseEvent } from '../../core/sse';
 import type { HttpModule, RouteDef } from '../../core/types';
 import { writeJsonResponse } from '../../core/body';
@@ -217,6 +217,7 @@ function clearSlackNotifications(): void {
 function broadcastSlackNotifications(): void {
   broadcastSseEvent('slack:list-update', slackNotifications.map(cloneSlackNotification));
   broadcastSseEvent('state', getBackendState());
+  broadcastSseEvent('next-up:list-update', getBackendNextUpItems());
 }
 
 function slackNotificationPriority(

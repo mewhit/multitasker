@@ -1,7 +1,7 @@
 import { PORT } from './core/constants';
 import { startHttpServer, stopHttpServer } from './core/http-server';
 import { closeSseClients, broadcastSseEvent } from './core/sse';
-import { getBackendState } from './core/backend-state';
+import { getBackendNextUpItems, getBackendState } from './core/backend-state';
 import { Router } from './core/router';
 import type { RouteDef } from './core/types';
 import { getErrorMessage } from './core/util';
@@ -14,6 +14,7 @@ import { restorePersistedState } from './modules/sessions/persistence';
 sessionManager.on('sessionUpdate', (sessions: unknown) => {
   broadcastSseEvent('session:list-update', sessions);
   broadcastSseEvent('state', getBackendState());
+  broadcastSseEvent('next-up:list-update', getBackendNextUpItems());
 });
 
 // Restore persisted state (sessions, tasks, notifications)

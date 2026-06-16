@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const SLACK_API_URL = 'https://slack.com/api';
-const DEFAULT_MULTITASKER_EVENT_URL = 'http://127.0.0.1:39017/slack-event';
+const DEFAULT_MULTITASKER_EVENT_URL = 'http://127.0.0.1:39017/slack/';
+const DEFAULT_LOG_FILE = path.join(__dirname, '..', 'logs', 'slack-socket.log');
 const RECONNECT_INITIAL_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
@@ -16,14 +17,24 @@ const multitaskerEventUrl =
   getEventUrl(readEnv('MULTITASKER_SLACK_NOTIFICATION_URL')) ||
   DEFAULT_MULTITASKER_EVENT_URL;
 const logRawEvents = readEnv('SLACK_LOG_RAW_EVENTS') === '1';
+const logFilePath = resolveLogFilePath(readEnv('SLACK_LOG_FILE') || DEFAULT_LOG_FILE);
+
+try {
+  prepareLogFile(logFilePath);
+} catch (error) {
+  console.error(`Failed to initialize Slack log file ${logFilePath}: ${getErrorMessage(error)}`);
+  process.exit(1);
+}
+
+logInfo(`Slack connector logs will be written to ${logFilePath}`);
 
 if (!appToken) {
-  console.error('Missing SLACK_APP_TOKEN. Create a Slack app, enable Socket Mode, and set an xapp token with connections:write.');
+  logError('Missing SLACK_APP_TOKEN. Create a Slack app, enable Socket Mode, and set an xapp token with connections:write.');
   process.exit(1);
 }
 
 if (typeof WebSocket !== 'function') {
-  console.error('This connector needs Node 22+ with the global WebSocket API.');
+  logError('This connector needs Node 22+ with the global WebSocket API.');
   process.exit(1);
 }
 
@@ -43,11 +54,11 @@ async function run() {
       await connectSocketMode();
       reconnectDelayMs = RECONNECT_INITIAL_MS;
     } catch (error) {
-      console.error(`Slack connector failed: ${getErrorMessage(error)}`);
+      logError(`Slack connector failed: ${getErrorMessage(error)}`);
     }
 
     if (stopped) return;
-    console.log(`Reconnecting Slack Socket Mode in ${reconnectDelayMs}ms...`);
+    logInfo(`Reconnecting Slack Socket Mode in ${reconnectDelayMs}ms...`);
     await delay(reconnectDelayMs);
     reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_MS);
   }
@@ -63,12 +74,12 @@ async function connectSocketMode() {
 
     socket.addEventListener('open', () => {
       opened = true;
-      console.log('Connected to Slack Socket Mode.');
+      logInfo('Connected to Slack Socket Mode.');
     });
 
     socket.addEventListener('message', event => {
       void handleSocketMessage(socket, event.data).catch(error => {
-        console.error(`Slack message forwarding failed: ${getErrorMessage(error)}`);
+        logError(`Slack message forwarding failed: ${getErrorMessage(error)}`);
       });
     });
 
@@ -78,7 +89,7 @@ async function connectSocketMode() {
 
     socket.addEventListener('close', () => {
       if (activeSocket === socket) activeSocket = undefined;
-      console.log('Slack Socket Mode disconnected.');
+      logInfo('Slack Socket Mode disconnected.');
       resolve(undefined);
     });
   });
@@ -130,13 +141,13 @@ async function postSlackEvent(envelope) {
 }
 
 function logSlackRawEvent(envelope) {
-  console.log(`Slack raw event ${JSON.stringify(envelope)}`);
+  logInfo(`Slack raw event ${JSON.stringify(envelope)}`);
 }
 
 function logSlackEventForwarded(envelope) {
   const payload = readRecord(envelope, 'payload');
   const event = payload ? readRecord(payload, 'event') : undefined;
-  console.log(
+  logInfo(
     `Slack event forwarded envelopeId=${JSON.stringify(readString(envelope, 'envelope_id'))}` +
     ` eventId=${JSON.stringify(readString(payload, 'event_id'))}` +
     ` channelId=${JSON.stringify(readString(event, 'channel'))}` +
@@ -181,7 +192,7 @@ function getEventUrl(notificationUrl) {
 
   try {
     const url = new URL(notificationUrl);
-    url.pathname = '/slack-event';
+    url.pathname = '/slack/';
     url.search = '';
     url.hash = '';
     return url.toString();
@@ -205,6 +216,34 @@ function loadDotEnv() {
     const key = trimmedLine.slice(0, equalsIndex).trim();
     const value = unquoteEnvValue(trimmedLine.slice(equalsIndex + 1).trim());
     if (key && process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+function resolveLogFilePath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(__dirname, '..', value);
+}
+
+function prepareLogFile(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, '', 'utf8');
+}
+
+function logInfo(message) {
+  writeLog('INFO', message);
+  console.log(message);
+}
+
+function logError(message) {
+  writeLog('ERROR', message);
+  console.error(message);
+}
+
+function writeLog(level, message) {
+  const line = `${new Date().toISOString()} ${level} ${String(message)}\n`;
+  try {
+    fs.appendFileSync(logFilePath, line, 'utf8');
+  } catch (error) {
+    console.error(`Failed to write Slack log file ${logFilePath}: ${getErrorMessage(error)}`);
   }
 }
 

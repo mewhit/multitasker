@@ -3,6 +3,7 @@ import type { ManualTaskState } from '../../../shared/settings';
 import { normalizeTaskPriority, saveManualTasks } from '../../../shared/settings';
 import { manualTasks } from '../../state/tasks';
 import { MAX_MANUAL_TASKS } from '../../core/constants';
+import { publishManualTaskAddedToWebSocket } from '../../core/websocket-events';
 import { truncateTaskText } from '../../utils/date';
 import { cloneManualTask } from '../../utils/clone';
 import { readStringField, readOptionalNumberField } from '../../utils/payload';
@@ -51,11 +52,13 @@ export function parseManualTaskAddRequest(payload: unknown): ManualTaskState | n
 export function storeManualTask(task: ManualTaskState): ManualTaskState {
   const existingIndex = manualTasks.findIndex(existing => existing.id === task.id);
   if (existingIndex >= 0) manualTasks.splice(existingIndex, 1);
-  manualTasks.unshift(cloneManualTask(task));
+  const storedTask = cloneManualTask(task);
+  manualTasks.unshift(storedTask);
   while (manualTasks.length > MAX_MANUAL_TASKS) manualTasks.pop();
   saveManualTasks(manualTasks);
   broadcastManualTasks();
-  return cloneManualTask(task);
+  publishManualTaskAddedToWebSocket(storedTask);
+  return cloneManualTask(storedTask);
 }
 
 export function removeManualTask(id: string): boolean {

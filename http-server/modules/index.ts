@@ -9,6 +9,7 @@ import { recurringTasksModule } from './recurring-tasks';
 import { githubReviewsModule } from './github-reviews';
 import { terminalsModule } from './terminals';
 import { sessionsModule } from './sessions';
+import { slackModule } from './slack';
 import { databaseModule } from './database';
 export const modules: HttpModule[] = [
   healthModule,
@@ -22,4 +23,5 @@ export const modules: HttpModule[] = [
   githubReviewsModule,
   terminalsModule,
   sessionsModule,
+  slackModule,
 ];

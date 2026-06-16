@@ -5,6 +5,7 @@ import { exec, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, request, type ClientRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { WebSocket } from "ws";
 import { SessionManager, type Session, type SessionStatus, type TerminalBinding, type TerminalUpdate } from "../sessionManager";
 import { createShellPty as spawnShellPty, createShellSsh as spawnShellSsh, killShellSession } from "../shellServerClient";
 import {
@@ -16,6 +17,9 @@ import {
   saveSessions,
   loadManualTasks,
   saveManualTasks,
+  loadSlackNotifications,
+  saveSlackNotifications,
+  normalizeSlackNotification,
   loadRecurringTasks,
   saveRecurringTasks,
   clearGoogleCalendarAuth,
@@ -26,6 +30,7 @@ import {
   saveGoogleCalendarEvents,
   clearGoogleCalendarEvents,
   ManualTaskState,
+  SlackNotificationState,
   RecurringTaskState,
   RecurringTaskFrequency,
   GoogleCalendarAuthState,
@@ -53,15 +58,23 @@ const DEFAULT_TERMINAL_UPDATE_PORT = 39017;
 const TERMINAL_UPDATE_PORT = readBackendPort();
 const TERMINAL_UPDATE_PATH = "/terminal-update";
 const TERMINAL_EVENT_PATH = "/terminal-event";
+const SLACK_EVENT_PATH = "/slack/";
+const SLACK_EVENT_PATH_NO_TRAILING_SLASH = "/slack";
+const EXTENSION_SLACK_EVENT_PATH = "/extensions/slack/events";
 const BACKEND_HEALTH_PATH = "/api/health";
 const BACKEND_STARTUP_WAIT_MS = 5000;
 const BACKEND_PROBE_INTERVAL_MS = 100;
 const BACKEND_PROBE_TIMEOUT_MS = 300;
 const BACKEND_EVENTS_PATH = "/api/events";
 const BACKEND_EVENTS_RECONNECT_MS = 1000;
+const DEFAULT_SHELL_SERVER_URL = "ws://127.0.0.1:4321";
+const BACKEND_TASK_WS_RECONNECT_INITIAL_MS = 500;
+const BACKEND_TASK_WS_RECONNECT_MAX_MS = 5000;
 const MAX_TERMINAL_EVENT_BODY_BYTES = 512 * 1024;
 const MAX_MANUAL_TASKS = 200;
 const MAX_MANUAL_TASK_TEXT_LENGTH = 4000;
+const MAX_SLACK_NOTIFICATIONS = 100;
+const MAX_SLACK_TEXT_LENGTH = 4000;
 const MAX_RECURRING_TASKS = 100;
 const RECURRING_TASK_CHECK_INTERVAL_MS = 30 * 1000;
 const MAX_PENDING_TERMINAL_EVENTS_PER_SESSION = 200;
@@ -79,6 +92,8 @@ const GOOGLE_CALENDAR_AUTH_TIMEOUT_MS = 2 * 60 * 1000;
 const GOOGLE_CALENDAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
 const MAX_GOOGLE_CALENDAR_EVENTS = 100;
+const SLACK_OAUTH_SCRIPT_RELATIVE_PATH = path.join("extension", "slack", "src", "slack-oauth.js");
+const SLACK_ENV_RELATIVE_PATH = path.join("extension", "slack", ".env");
 
 interface GoogleCalendarStatus {
   connected: boolean;
@@ -115,6 +130,11 @@ interface GoogleCalendarAuthResult {
   ok: boolean;
   message: string;
   status: GoogleCalendarStatus;
+}
+
+interface SlackAuthStatus {
+  ok: boolean;
+  message: string;
 }
 
 interface GoogleTokenResponse {
@@ -168,6 +188,13 @@ let backendEventsSyncEnabled = false;
 let backendEventsBuffer = "";
 let backendEventsCurrentEvent = "message";
 let backendEventsDataLines: string[] = [];
+let backendTaskSocket: WebSocket | null = null;
+let backendTaskSocketReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let backendTaskSocketReconnectDelay = BACKEND_TASK_WS_RECONNECT_INITIAL_MS;
+let backendTaskSocketConnecting = false;
+let backendTaskSocketAuthDisabled = false;
+let backendTaskSocketLastWarning = "";
+let slackAuthProcess: ReturnType<typeof spawn> | null = null;
 let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const pendingTerminalUpdates = new Map<string, TerminalUpdate>();
 const pendingTerminalEvents = new Map<string, TerminalEvent[]>();
@@ -175,6 +202,7 @@ const taskIdByTerminalRef = new Map<string, string>();
 const terminalDebugLogFileBySessionId = new Map<string, string>();
 const reportedDebugLogWriteFailures = new Set<string>();
 const manualTasks: ManualTaskState[] = [];
+const slackNotifications: SlackNotificationState[] = [];
 const recurringTasks: RecurringTaskState[] = [];
 const googleCalendarEvents: GoogleCalendarEventState[] = [];
 let recurringTaskTimer: ReturnType<typeof setInterval> | null = null;
@@ -332,6 +360,23 @@ function backendUrl(pathname: string): string {
   return `http://${TERMINAL_UPDATE_HOST}:${TERMINAL_UPDATE_PORT}${pathname}`;
 }
 
+function shellServerWebSocketUrl(): string {
+  return process.env["MULTITASKER_SHELL_SERVER_URL"]?.trim() || DEFAULT_SHELL_SERVER_URL;
+}
+
+function shellServerAuthToken(): string {
+  return process.env["SHELL_AUTH_TOKEN"] || "";
+}
+
+function resolveProjectPath(relativePath: string): string {
+  const candidates = [
+    path.join(process.cwd(), relativePath),
+    path.join(app.getAppPath(), relativePath),
+    path.resolve(__dirname, "..", "..", "..", relativePath),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -380,6 +425,7 @@ function cloneSession(session: Session): Session {
 
 function startStandaloneBackendSync(): void {
   backendEventsSyncEnabled = true;
+  startBackendTaskWebSocketSync();
   if (backendEventsRequest || backendEventsReconnectTimer) return;
   connectStandaloneBackendEvents();
 }
@@ -397,6 +443,137 @@ function stopStandaloneBackendSync(): void {
   backendEventsBuffer = "";
   backendEventsCurrentEvent = "message";
   backendEventsDataLines = [];
+  stopBackendTaskWebSocketSync();
+}
+
+function startBackendTaskWebSocketSync(): void {
+  if (!backendEventsSyncEnabled || backendTaskSocketAuthDisabled) return;
+  if (
+    backendTaskSocketConnecting ||
+    (backendTaskSocket &&
+      (backendTaskSocket.readyState === WebSocket.OPEN || backendTaskSocket.readyState === WebSocket.CONNECTING))
+  ) {
+    return;
+  }
+
+  backendTaskSocketConnecting = true;
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(shellServerWebSocketUrl(), { perMessageDeflate: false });
+  } catch (error) {
+    backendTaskSocketConnecting = false;
+    reportBackendTaskSocketWarning(`Manual task WebSocket sync failed: ${getErrorMessage(error)}`);
+    scheduleBackendTaskWebSocketReconnect();
+    return;
+  }
+  backendTaskSocket = ws;
+  ws.on("open", () => {
+    if (backendTaskSocket !== ws) return;
+    backendTaskSocketConnecting = false;
+  });
+  ws.on("message", (raw) => {
+    if (backendTaskSocket !== ws) return;
+    handleBackendTaskWebSocketMessage(ws, raw.toString("utf8"));
+  });
+  ws.on("error", (error) => {
+    reportBackendTaskSocketWarning(`Manual task WebSocket sync failed: ${getErrorMessage(error)}`);
+  });
+  ws.on("close", () => {
+    handleBackendTaskWebSocketClosed(ws);
+  });
+}
+
+function stopBackendTaskWebSocketSync(): void {
+  if (backendTaskSocketReconnectTimer) {
+    clearTimeout(backendTaskSocketReconnectTimer);
+    backendTaskSocketReconnectTimer = null;
+  }
+  const ws = backendTaskSocket;
+  backendTaskSocket = null;
+  backendTaskSocketConnecting = false;
+  backendTaskSocketReconnectDelay = BACKEND_TASK_WS_RECONNECT_INITIAL_MS;
+  if (ws) {
+    try {
+      ws.close();
+    } catch {
+      // The socket may already be closing.
+    }
+  }
+}
+
+function handleBackendTaskWebSocketMessage(ws: WebSocket, raw: string): void {
+  const message = parseJsonResponseBody(raw);
+  if (!isRecord(message)) return;
+
+  const type = readStringField(message, "type").trim();
+  if (type === "ready") {
+    if (message["requiresAuth"] === true && message["authenticated"] !== true) {
+      const token = shellServerAuthToken();
+      if (!token) {
+        disableBackendTaskSocket("shell gateway requires SHELL_AUTH_TOKEN");
+        return;
+      }
+      ws.send(JSON.stringify({ type: "hello", token }));
+      return;
+    }
+    markBackendTaskSocketConnected(ws);
+    return;
+  }
+
+  if (type === "authenticated") {
+    markBackendTaskSocketConnected(ws);
+    return;
+  }
+
+  if (type === "manual_tasks") {
+    applyStandaloneBackendManualTasks(message["tasks"]);
+    return;
+  }
+
+  if (type === "manual_task_created") {
+    applyStandaloneBackendManualTask(message["task"]);
+    return;
+  }
+
+  if (type === "error" && readStringField(message, "code").trim() === "unauthorized") {
+    disableBackendTaskSocket("shell gateway rejected manual task WebSocket authentication");
+  }
+}
+
+function markBackendTaskSocketConnected(ws: WebSocket): void {
+  if (backendTaskSocket !== ws) return;
+  backendTaskSocketConnecting = false;
+  backendTaskSocketReconnectDelay = BACKEND_TASK_WS_RECONNECT_INITIAL_MS;
+  backendTaskSocketLastWarning = "";
+}
+
+function handleBackendTaskWebSocketClosed(ws: WebSocket): void {
+  if (backendTaskSocket !== ws) return;
+  backendTaskSocket = null;
+  backendTaskSocketConnecting = false;
+  scheduleBackendTaskWebSocketReconnect();
+}
+
+function scheduleBackendTaskWebSocketReconnect(): void {
+  if (!backendEventsSyncEnabled || backendTaskSocketAuthDisabled || backendTaskSocketReconnectTimer) return;
+  const delayMs = backendTaskSocketReconnectDelay;
+  backendTaskSocketReconnectDelay = Math.min(backendTaskSocketReconnectDelay * 2, BACKEND_TASK_WS_RECONNECT_MAX_MS);
+  backendTaskSocketReconnectTimer = setTimeout(() => {
+    backendTaskSocketReconnectTimer = null;
+    startBackendTaskWebSocketSync();
+  }, delayMs);
+}
+
+function disableBackendTaskSocket(reason: string): void {
+  backendTaskSocketAuthDisabled = true;
+  reportBackendTaskSocketWarning(`Manual task WebSocket sync disabled: ${reason}.`);
+  stopBackendTaskWebSocketSync();
+}
+
+function reportBackendTaskSocketWarning(message: string): void {
+  if (message === backendTaskSocketLastWarning) return;
+  backendTaskSocketLastWarning = message;
+  console.warn(message);
 }
 
 function connectStandaloneBackendEvents(): void {
@@ -506,6 +683,10 @@ function applyStandaloneBackendEvent(eventName: string, payload: unknown): void 
     applyStandaloneBackendSessions(payload);
   } else if (eventName === "manual-task:list-update") {
     applyStandaloneBackendManualTasks(payload);
+  } else if (eventName === "slack:list-update") {
+    applyStandaloneBackendSlackNotifications(payload);
+  } else if (eventName === "slack:notification") {
+    applyStandaloneBackendSlackNotification(payload);
   } else if (eventName === "recurring-task:list-update") {
     applyStandaloneBackendRecurringTasks(payload);
   }
@@ -515,6 +696,7 @@ function applyStandaloneBackendState(payload: unknown): void {
   if (!isRecord(payload)) return;
   applyStandaloneBackendSessions(payload["sessions"]);
   applyStandaloneBackendManualTasks(payload["manualTasks"]);
+  applyStandaloneBackendSlackNotifications(payload["slackNotifications"]);
   applyStandaloneBackendRecurringTasks(payload["recurringTasks"]);
 }
 
@@ -533,6 +715,35 @@ function applyStandaloneBackendManualTasks(payload: unknown): void {
 
   manualTasks.splice(0, manualTasks.length, ...tasks.map((task) => ({ ...task })));
   broadcastManualTasks();
+}
+
+function applyStandaloneBackendManualTask(payload: unknown): void {
+  const task = normalizeBackendManualTask(payload);
+  if (!task) return;
+
+  const existingIndex = manualTasks.findIndex((existing) => existing.id === task.id);
+  if (existingIndex >= 0) manualTasks.splice(existingIndex, 1);
+  manualTasks.unshift({ ...task });
+  broadcastManualTasks();
+}
+
+function applyStandaloneBackendSlackNotifications(payload: unknown): void {
+  const notifications = normalizeBackendSlackNotifications(payload);
+  if (!notifications) return;
+
+  slackNotifications.splice(0, slackNotifications.length, ...notifications.map(cloneSlackNotification));
+  broadcastSlackNotifications();
+}
+
+function applyStandaloneBackendSlackNotification(payload: unknown): void {
+  const notification = normalizeBackendSlackNotification(payload);
+  if (!notification) return;
+
+  const existingIndex = slackNotifications.findIndex((existing) => existing.id === notification.id);
+  if (existingIndex >= 0) slackNotifications.splice(existingIndex, 1);
+  slackNotifications.unshift(cloneSlackNotification(notification));
+  while (slackNotifications.length > MAX_SLACK_NOTIFICATIONS) slackNotifications.pop();
+  broadcastSlackNotification(notification);
 }
 
 function applyStandaloneBackendRecurringTasks(payload: unknown): void {
@@ -652,14 +863,37 @@ function normalizeBackendManualTasks(payload: unknown): ManualTaskState[] | null
   if (!Array.isArray(payload)) return null;
   const tasks: ManualTaskState[] = [];
   for (const value of payload) {
-    if (!isRecord(value)) continue;
-    const id = readStringField(value, "id").trim();
-    const text = readStringField(value, "text").trim();
-    const createdAt = readOptionalNumberField(value, "createdAt");
-    if (!id || !text || createdAt === undefined) continue;
-    tasks.push({ id, text, createdAt });
+    const task = normalizeBackendManualTask(value);
+    if (task) tasks.push(task);
   }
   return tasks;
+}
+
+function normalizeBackendManualTask(value: unknown): ManualTaskState | null {
+  if (!isRecord(value)) return null;
+  const id = readStringField(value, "id").trim();
+  const text = readStringField(value, "text").trim();
+  const createdAt = readOptionalNumberField(value, "createdAt");
+  if (!id || !text || createdAt === undefined) return null;
+
+  const task: ManualTaskState = { id, text, createdAt };
+  const priority = readOptionalNumberField(value, "priority");
+  if (priority !== undefined) task.priority = priority;
+  return task;
+}
+
+function normalizeBackendSlackNotifications(payload: unknown): SlackNotificationState[] | null {
+  if (!Array.isArray(payload)) return null;
+  const notifications: SlackNotificationState[] = [];
+  for (const value of payload) {
+    const notification = normalizeBackendSlackNotification(value);
+    if (notification) notifications.push(notification);
+  }
+  return notifications;
+}
+
+function normalizeBackendSlackNotification(value: unknown): SlackNotificationState | null {
+  return normalizeSlackNotification(value);
 }
 
 function normalizeBackendRecurringTasks(payload: unknown): RecurringTaskState[] | null {
@@ -748,6 +982,19 @@ function removeStandaloneBackendManualTask(id: string): void {
   if (existingIndex < 0) return;
   manualTasks.splice(existingIndex, 1);
   broadcastManualTasks();
+}
+
+function removeStandaloneBackendSlackNotification(id: string): void {
+  const existingIndex = slackNotifications.findIndex((notification) => notification.id === id);
+  if (existingIndex < 0) return;
+  slackNotifications.splice(existingIndex, 1);
+  broadcastSlackNotifications();
+}
+
+function clearStandaloneBackendSlackNotifications(): void {
+  if (slackNotifications.length === 0) return;
+  slackNotifications.length = 0;
+  broadcastSlackNotifications();
 }
 
 function removeStandaloneBackendRecurringTask(id: string): void {
@@ -1055,7 +1302,11 @@ function findSessionForTerminalIdentity(identity: TerminalEventIdentity): Sessio
   );
 }
 
-function createManualTask(textValue: unknown, createdAtValue?: unknown, priorityValue?: unknown): ManualTaskState | null {
+function createManualTask(
+  textValue: unknown,
+  createdAtValue?: unknown,
+  priorityValue?: unknown,
+): ManualTaskState | null {
   const text = typeof textValue === "string" ? textValue.trim() : "";
   if (!text) {
     console.error("Failed to add manual task: task text is required");
@@ -1124,6 +1375,177 @@ function broadcastManualTasks(): void {
     "manual-task:list-update",
     manualTasks.map((task) => ({ ...task })),
   );
+}
+
+function cloneSlackNotification(notification: SlackNotificationState): SlackNotificationState {
+  return { ...notification };
+}
+
+function broadcastSlackNotification(notification: SlackNotificationState): void {
+  mainWindow?.webContents.send("slack:notification", cloneSlackNotification(notification));
+}
+
+function broadcastSlackNotifications(): void {
+  mainWindow?.webContents.send("slack:list-update", slackNotifications.map(cloneSlackNotification));
+}
+
+function removeSlackNotification(id: string): boolean {
+  const existingIndex = slackNotifications.findIndex((notification) => notification.id === id);
+  if (existingIndex < 0) {
+    console.error(`Failed to remove Slack notification: notification "${id}" was not found`);
+    return false;
+  }
+
+  slackNotifications.splice(existingIndex, 1);
+  saveSlackNotifications(slackNotifications);
+  broadcastSlackNotifications();
+  return true;
+}
+
+function clearSlackNotifications(): void {
+  if (slackNotifications.length === 0) return;
+  slackNotifications.length = 0;
+  saveSlackNotifications(slackNotifications);
+  broadcastSlackNotifications();
+}
+
+function storeSlackNotification(notification: SlackNotificationState): SlackNotificationState {
+  const existingIndex = slackNotifications.findIndex((existing) => existing.id === notification.id);
+  if (existingIndex >= 0) slackNotifications.splice(existingIndex, 1);
+  const storedNotification = cloneSlackNotification(notification);
+  slackNotifications.unshift(storedNotification);
+  while (slackNotifications.length > MAX_SLACK_NOTIFICATIONS) slackNotifications.pop();
+  saveSlackNotifications(slackNotifications);
+  broadcastSlackNotification(storedNotification);
+  broadcastSlackNotifications();
+  return cloneSlackNotification(storedNotification);
+}
+
+type SlackEventParseResult =
+  | { kind: "notification"; notification: SlackNotificationState }
+  | { kind: "challenge"; challenge: string }
+  | { kind: "skipped"; reason: string }
+  | { kind: "invalid"; error: string };
+
+function parseSlackEvent(payload: unknown): SlackEventParseResult {
+  if (!isRecord(payload)) return { kind: "invalid", error: "invalid_slack_event" };
+
+  const eventPayload = isRecord(payload["payload"]) ? payload["payload"] : payload;
+  const payloadType = readStringField(eventPayload, "type").trim();
+  if (payloadType === "url_verification") {
+    const challenge = readStringField(eventPayload, "challenge").trim();
+    return challenge ? { kind: "challenge", challenge } : { kind: "invalid", error: "missing_slack_challenge" };
+  }
+
+  const event = isRecord(eventPayload["event"]) ? eventPayload["event"] : undefined;
+  if (!event) return { kind: "skipped", reason: "missing_event" };
+  if (!shouldCreateSlackNotificationForEvent(event)) return { kind: "skipped", reason: "not_actionable" };
+
+  const text = normalizeSlackText(readStringField(event, "text"));
+  if (!text) return { kind: "skipped", reason: "missing_text" };
+
+  const teamId = readStringField(eventPayload, "team_id").trim() || readStringField(payload, "team_id").trim();
+  const channelId = readStringField(event, "channel").trim();
+  const channelType = readStringField(event, "channel_type").trim();
+  const userId = readStringField(event, "user").trim() || readStringField(event, "bot_id").trim();
+  const ts = readStringField(event, "ts").trim() || readStringField(event, "event_ts").trim();
+  const threadTs = readStringField(event, "thread_ts").trim();
+  const permalink = readStringField(event, "permalink").trim();
+  const eventId = readStringField(eventPayload, "event_id").trim() || readStringField(payload, "envelope_id").trim();
+  const receivedAt = parseSlackTimestampMs(ts) ?? parseSlackEventTimeMs(eventPayload["event_time"]) ?? Date.now();
+  const notification: SlackNotificationState = {
+    id: getSlackNotificationId({ teamId, channelId, ts, eventId, userId, text }),
+    text: truncateSlackText(text),
+    receivedAt,
+  };
+  if (teamId) notification.teamId = teamId;
+  if (channelId) notification.channelId = channelId;
+  if (channelType) notification.channelType = channelType;
+  if (userId) notification.userId = userId;
+  if (ts) notification.ts = ts;
+  if (threadTs) notification.threadTs = threadTs;
+  if (permalink) notification.permalink = permalink;
+  const priority = slackNotificationPriority(event, channelType);
+  notification.priorityRank = priority.rank;
+  notification.priorityLabel = priority.label;
+  return { kind: "notification", notification };
+}
+
+function shouldCreateSlackNotificationForEvent(event: Record<string, unknown>): boolean {
+  const eventType = readStringField(event, "type").trim();
+  if (eventType === "app_mention") return true;
+  if (eventType !== "message") return false;
+
+  const subtype = readStringField(event, "subtype").trim();
+  if (subtype) return false;
+
+  const channelType = readStringField(event, "channel_type").trim();
+  const channelId = readStringField(event, "channel").trim();
+  if (channelType === "im" || channelType === "mpim" || channelId.startsWith("D")) return true;
+
+  const slackUserId = readSlackConfigValue("SLACK_USER_ID");
+  const text = readStringField(event, "text");
+  return Boolean(slackUserId && text.includes(`<@${slackUserId}>`));
+}
+
+function getSlackNotificationId(identity: {
+  teamId: string;
+  channelId: string;
+  ts: string;
+  eventId: string;
+  userId: string;
+  text: string;
+}): string {
+  const stableValue = [
+    identity.teamId,
+    identity.channelId,
+    identity.ts,
+    identity.eventId,
+    identity.userId,
+    identity.text,
+  ].join("\n");
+  return `slack-${createHash("sha256").update(stableValue).digest("hex").slice(0, 16)}`;
+}
+
+function slackNotificationPriority(
+  event: Record<string, unknown>,
+  channelType: string,
+): { rank: number; label: NonNullable<SlackNotificationState["priorityLabel"]> } {
+  if (channelType === "im" || channelType === "mpim") return { rank: 0, label: "dm" };
+  const slackUserId = readSlackConfigValue("SLACK_USER_ID");
+  const text = readStringField(event, "text");
+  if (slackUserId && text.includes(`<@${slackUserId}>`)) return { rank: 1, label: "mention" };
+  if (readStringField(event, "type").trim() === "app_mention") return { rank: 1, label: "mention" };
+  return { rank: 4, label: "other" };
+}
+
+function normalizeSlackText(text: string): string {
+  return decodeSlackEntities(text)
+    .replace(/<@([A-Z0-9]+)>/gi, "@$1")
+    .replace(/<#([A-Z0-9]+)\|([^>]+)>/gi, "#$2")
+    .replace(/<([^>|]+)\|([^>]+)>/g, "$2 ($1)")
+    .replace(/<([^>]+)>/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function decodeSlackEntities(text: string): string {
+  return text.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+function truncateSlackText(text: string): string {
+  if (text.length <= MAX_SLACK_TEXT_LENGTH) return text;
+  return `${text.slice(0, MAX_SLACK_TEXT_LENGTH - 1)}…`;
+}
+
+function parseSlackTimestampMs(value: string): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1000) : undefined;
+}
+
+function parseSlackEventTimeMs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value * 1000) : undefined;
 }
 
 function truncateManualTaskText(text: string): string {
@@ -2094,6 +2516,156 @@ async function openGoogleCalendarEvent(id: unknown): Promise<boolean> {
   return true;
 }
 
+async function openSlackNotification(id: unknown): Promise<boolean> {
+  if (typeof id !== "string" || !id.trim()) return false;
+  const notification = slackNotifications.find((candidate) => candidate.id === id.trim());
+  const url = notification ? buildSlackExternalUrl(notification) : "";
+  if (!url) return false;
+  try {
+    await shell.openExternal(url);
+    return true;
+  } catch (error) {
+    console.error(`Failed to open Slack notification "${id.trim()}": ${getErrorMessage(error)}`);
+    return false;
+  }
+}
+
+function buildSlackExternalUrl(notification: SlackNotificationState): string {
+  const channelId = notification.channelId?.trim() ?? "";
+  const permalink = notification.permalink?.trim() ?? "";
+  if (!channelId) return isSlackPermalink(permalink) ? permalink : "";
+
+  const teamId = notification.teamId?.trim() || readSlackConfigValue("SLACK_TEAM_ID");
+  const url = new URL("slack://channel");
+  if (teamId) url.searchParams.set("team", teamId);
+  url.searchParams.set("id", channelId);
+
+  const messageTs = notification.ts?.trim() || notification.threadTs?.trim() || "";
+  if (messageTs) url.searchParams.set("message", messageTs);
+  return url.toString();
+}
+
+function isSlackPermalink(value: string): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && (url.hostname === "slack.com" || url.hostname.endsWith(".slack.com"));
+  } catch {
+    return false;
+  }
+}
+
+function startSlackAuth(): SlackAuthStatus {
+  if (slackAuthProcess) {
+    return { ok: true, message: "Slack authorization is already running." };
+  }
+
+  const oauthScriptPath = resolveProjectPath(SLACK_OAUTH_SCRIPT_RELATIVE_PATH);
+  if (!fs.existsSync(oauthScriptPath)) {
+    return notifySlackAuthStatus({
+      ok: false,
+      message: `Slack authorization script was not found at ${oauthScriptPath}.`,
+    });
+  }
+
+  const missingKeys = ["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET"].filter((key) => !readSlackConfigValue(key));
+  if (missingKeys.length > 0) {
+    return notifySlackAuthStatus({
+      ok: false,
+      message: `Missing ${missingKeys.join(" and ")}. Add them to ${SLACK_ENV_RELATIVE_PATH} first.`,
+    });
+  }
+
+  const projectRoot = path.resolve(path.dirname(oauthScriptPath), "..", "..", "..");
+  const child = spawn(process.execPath, [oauthScriptPath], {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+    },
+    windowsHide: true,
+  });
+  slackAuthProcess = child;
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout = appendSlackAuthOutput(stdout, chunk);
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr = appendSlackAuthOutput(stderr, chunk);
+  });
+  child.once("error", (error) => {
+    if (slackAuthProcess === child) slackAuthProcess = null;
+    notifySlackAuthStatus({ ok: false, message: `Could not start Slack authorization: ${getErrorMessage(error)}` });
+  });
+  child.once("exit", (code, signal) => {
+    if (slackAuthProcess === child) slackAuthProcess = null;
+    if (code === 0) {
+      notifySlackAuthStatus({ ok: true, message: "Slack authorization completed." });
+      return;
+    }
+    const details = formatSlackAuthProcessOutput(stderr || stdout);
+    notifySlackAuthStatus({
+      ok: false,
+      message: `Slack authorization failed${signal ? ` (${signal})` : code !== null ? ` (exit ${code})` : ""}.${details ? ` ${details}` : ""}`,
+    });
+  });
+
+  return { ok: true, message: "Slack authorization started. Complete the browser flow to connect Slack." };
+}
+
+function notifySlackAuthStatus(status: SlackAuthStatus): SlackAuthStatus {
+  mainWindow?.webContents.send("slack:auth-status", status);
+  return status;
+}
+
+function readSlackConfigValue(key: string): string {
+  const processValue = process.env[key];
+  if (typeof processValue === "string" && processValue.trim()) return processValue.trim();
+
+  const envPath = resolveProjectPath(SLACK_ENV_RELATIVE_PATH);
+  if (!fs.existsSync(envPath)) return "";
+  return parseEnvContent(fs.readFileSync(envPath, "utf8"))[key]?.trim() ?? "";
+}
+
+function parseEnvContent(content: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const equalsIndex = line.indexOf("=");
+    if (equalsIndex <= 0) continue;
+    const key = line.slice(0, equalsIndex).trim();
+    if (key) env[key] = unquoteEnvValue(line.slice(equalsIndex + 1).trim());
+  }
+  return env;
+}
+
+function unquoteEnvValue(value: string): string {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function appendSlackAuthOutput(existing: string, chunk: string): string {
+  return `${existing}${chunk}`.slice(-4000);
+}
+
+function formatSlackAuthProcessOutput(output: string): string {
+  return output
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(" ")
+    .slice(0, 500);
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
@@ -2101,6 +2673,11 @@ function escapeHtml(value: string): string {
 function restorePersistedManualTasks(): void {
   manualTasks.length = 0;
   manualTasks.push(...loadManualTasks().slice(0, MAX_MANUAL_TASKS));
+}
+
+function restorePersistedSlackNotifications(): void {
+  slackNotifications.length = 0;
+  slackNotifications.push(...loadSlackNotifications().slice(0, MAX_SLACK_NOTIFICATIONS));
 }
 
 function restorePersistedRecurringTasks(): void {
@@ -2296,7 +2873,11 @@ async function handleTerminalUpdateHttpRequest(request: IncomingMessage, respons
   const isTerminalUpdatePath = requestPath === TERMINAL_UPDATE_PATH;
   const isTerminalEventPath = requestPath === TERMINAL_EVENT_PATH;
   const isTaskApiPath = requestPath === "/api/tasks" || requestPath === "/api/task/add" || requestPath === "/api/manual-task/add";
-  if (request.method !== "POST" || (!isTerminalUpdatePath && !isTerminalEventPath && !isTaskApiPath)) {
+  const isSlackEventPath =
+    requestPath === SLACK_EVENT_PATH ||
+    requestPath === SLACK_EVENT_PATH_NO_TRAILING_SLASH ||
+    requestPath === EXTENSION_SLACK_EVENT_PATH;
+  if (request.method !== "POST" || (!isTerminalUpdatePath && !isTerminalEventPath && !isTaskApiPath && !isSlackEventPath)) {
     writeJsonResponse(response, 404, { ok: false, error: "not_found" });
     return;
   }
@@ -2310,8 +2891,30 @@ async function handleTerminalUpdateHttpRequest(request: IncomingMessage, respons
     return;
   }
 
+  if (isSlackEventPath) {
+    const result = parseSlackEvent(parsedPayload);
+    if (result.kind === "invalid") {
+      writeJsonResponse(response, 400, { ok: false, error: result.error });
+      return;
+    }
+    if (result.kind === "challenge") {
+      writeJsonResponse(response, 200, { challenge: result.challenge });
+      return;
+    }
+    if (result.kind === "skipped") {
+      writeJsonResponse(response, 200, { ok: true, skipped: true, reason: result.reason });
+      return;
+    }
+    writeJsonResponse(response, 200, { ok: true, notification: storeSlackNotification(result.notification) });
+    return;
+  }
+
   if (isTaskApiPath) {
-    const task = createManualTask(readManualTaskText(parsedPayload), undefined, readManualTaskPriority(parsedPayload));
+    const task = createManualTask(
+      readManualTaskText(parsedPayload),
+      undefined,
+      readManualTaskPriority(parsedPayload),
+    );
     if (!task) {
       writeJsonResponse(response, 400, { ok: false, error: "invalid_manual_task" });
       return;
@@ -2500,6 +3103,44 @@ function setupLegacyIpc(): void {
     }
   });
 
+  ipcMain.handle("slack-notification:list", () => slackNotifications.map(cloneSlackNotification));
+
+  ipcMain.handle("slack-notification:open", (_event, id: unknown) => openSlackNotification(id));
+
+  ipcMain.handle("slack-notification:remove", async (_event, id: unknown) => {
+    if (typeof id !== "string" || !id.trim()) {
+      console.error("Failed to remove Slack notification: missing notification id");
+      return false;
+    }
+    const notificationId = id.trim();
+    try {
+      if (backendEventsSyncEnabled) {
+        const response = await postStandaloneBackend("/api/slack-notification/remove", { id: notificationId });
+        removeStandaloneBackendSlackNotification(notificationId);
+        return response["removed"] === true;
+      }
+      return removeSlackNotification(notificationId);
+    } catch (error) {
+      console.error(`Failed to remove Slack notification: ${getErrorMessage(error)}`);
+      return false;
+    }
+  });
+
+  ipcMain.handle("slack-notification:clear", async () => {
+    try {
+      if (backendEventsSyncEnabled) {
+        await postStandaloneBackend("/api/slack-notifications/clear", {});
+        clearStandaloneBackendSlackNotifications();
+        return true;
+      }
+      clearSlackNotifications();
+      return true;
+    } catch (error) {
+      console.error(`Failed to clear Slack notifications: ${getErrorMessage(error)}`);
+      return false;
+    }
+  });
+
   ipcMain.handle("recurring-task:list", () => recurringTasks.map(cloneRecurringTask));
 
   ipcMain.handle("recurring-task:add", (_event, text: unknown, time: unknown, schedule: unknown, priority?: unknown) =>
@@ -2530,12 +3171,17 @@ function setupIpc(): void {
   setupLegacyIpc();
   setupSharedIpc();
   setupGoogleCalendarIpc();
+  setupSlackIpc();
+}
+
+function setupSlackIpc(): void {
+  ipcMain.handle("slack:auth:start", () => startSlackAuth());
 }
 
 function setupSharedIpc(): void {
   ipcMain.handle("shell:get-config", () => ({
-    url: process.env["MULTITASKER_SHELL_SERVER_URL"]?.trim() || "ws://127.0.0.1:4321",
-    token: process.env["SHELL_AUTH_TOKEN"] || "",
+    url: shellServerWebSocketUrl(),
+    token: shellServerAuthToken(),
   }));
 
   ipcMain.handle("shell:create-pty", async (_e, cwdArg?: unknown, nameArg?: unknown) => {
@@ -2958,6 +3604,7 @@ function createWindow(): void {
   const settings = loadSettings();
   restorePersistedSessions(settings);
   restorePersistedManualTasks();
+  restorePersistedSlackNotifications();
   restorePersistedRecurringTasks();
   startRecurringTaskScheduler();
   restorePersistedGoogleCalendarEvents();

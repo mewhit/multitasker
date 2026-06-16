@@ -30,6 +30,7 @@ import {
   HttpSessionsClient,
   type DesktopSessionInfo,
 } from './http-sessions-client';
+import type { ManualTaskState } from '../shared/settings';
 
 interface Client {
   id: string;
@@ -45,6 +46,47 @@ const WS_BUFFER_WARN_BYTES = 256 * 1024;
 const WS_BUFFER_WARN_INTERVAL_MS = 1000;
 const WS_BUFFER_DROP_BYTES = 8 * 1024 * 1024;
 const WS_BUFFER_DROP_BYTES_DESKTOP = 64 * 1024 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readStringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readOptionalNumberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeManualTask(value: unknown): ManualTaskState | null {
+  if (!isRecord(value)) return null;
+  const id = readStringField(value, 'id');
+  const text = readStringField(value, 'text');
+  const createdAt = readOptionalNumberField(value, 'createdAt');
+  if (!id || !text || createdAt === undefined) return null;
+
+  const task: ManualTaskState = { id, text, createdAt };
+  const priority = readOptionalNumberField(value, 'priority');
+  if (priority !== undefined) task.priority = priority;
+  return task;
+}
+
+function normalizeManualTasks(value: unknown): ManualTaskState[] | null {
+  if (!Array.isArray(value)) return null;
+  const tasks: ManualTaskState[] = [];
+  for (const item of value) {
+    const task = normalizeManualTask(item);
+    if (task) tasks.push(task);
+  }
+  return tasks;
+}
+
+function cloneManualTask(task: ManualTaskState): ManualTaskState {
+  return { ...task };
+}
 
 // Per-session, per-client desired terminal size. When multiple clients
 // attach to the same PTY (e.g. xterm in multitasker + bridge-cli hosted
@@ -113,6 +155,8 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   const clientStatusWatches = new Map<string, Set<string>>();
   const analyzer = new OutputAnalyzer();
   const httpSessions = new HttpSessionsClient();
+  const latestManualTasks: ManualTaskState[] = [];
+  let hasManualTasksSnapshot = false;
   const multitasker = MULTITASKER_INTEGRATION_ENABLED
     ? new MultitaskerClient(MULTITASKER_BACKEND_URL)
     : null;
@@ -408,6 +452,43 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     }
   }
 
+  function sendManualTasksSnapshot(client: Client, requestId?: string): void {
+    if (!hasManualTasksSnapshot || !client.authenticated) return;
+    send(client, {
+      type: 'manual_tasks',
+      tasks: latestManualTasks.map(cloneManualTask),
+      ...(requestId !== undefined ? { id: requestId } : {}),
+    });
+  }
+
+  function broadcastManualTasks(tasks: ManualTaskState[]): void {
+    hasManualTasksSnapshot = true;
+    latestManualTasks.splice(0, latestManualTasks.length, ...tasks.map(cloneManualTask));
+    const msg: ServerMessage = {
+      type: 'manual_tasks',
+      tasks: latestManualTasks.map(cloneManualTask),
+    };
+    const serialized = JSON.stringify(msg);
+    for (const c of clients.values()) {
+      if (c.authenticated) safeWsSend(c, serialized);
+    }
+  }
+
+  function broadcastManualTaskCreated(task: ManualTaskState): void {
+    hasManualTasksSnapshot = true;
+    const existingIndex = latestManualTasks.findIndex(existing => existing.id === task.id);
+    if (existingIndex >= 0) latestManualTasks.splice(existingIndex, 1);
+    latestManualTasks.unshift(cloneManualTask(task));
+    const msg: ServerMessage = {
+      type: 'manual_task_created',
+      task: cloneManualTask(task),
+    };
+    const serialized = JSON.stringify(msg);
+    for (const c of clients.values()) {
+      if (c.authenticated) safeWsSend(c, serialized);
+    }
+  }
+
   // Broadcast desktop session_removed event to all connected clients
   function broadcastDesktopSessionRemoved(sessionId: string): void {
     log.info('desktop session removed', { sourceApp: 'http-server', sessionId });
@@ -603,6 +684,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
       defaults: { shell: defaultShell(), cols: DEFAULT_COLS, rows: DEFAULT_ROWS },
     };
     ws.send(JSON.stringify(ready));
+    if (client.authenticated) sendManualTasksSnapshot(client);
 
     ws.on('message', (raw) => {
       const text = typeof raw === 'string' ? raw : raw.toString('utf8');
@@ -738,12 +820,14 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         if (!AUTH_TOKEN) {
           client.authenticated = true;
           send(client, { type: 'authenticated', ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          sendManualTasksSnapshot(client);
           await sendDesktopSessionsSnapshot(client);
           return;
         }
         if (msg.token === AUTH_TOKEN) {
           client.authenticated = true;
           send(client, { type: 'authenticated', ...(msg.id !== undefined ? { id: msg.id } : {}) });
+          sendManualTasksSnapshot(client);
           await sendDesktopSessionsSnapshot(client);
         } else {
           sendError(client, 'unauthorized', 'invalid token', {
@@ -771,6 +855,30 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
       case 'list_desktop_sessions': {
         if (!requireAuth(client, msg)) return;
         await sendDesktopSessionsSnapshot(client, msg.id);
+        return;
+      }
+      case 'backend_manual_task_added': {
+        if (!requireAuth(client, msg)) return;
+        const task = normalizeManualTask(msg.task);
+        if (!task) {
+          sendError(client, 'invalid_message', 'invalid manual task payload', {
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+          return;
+        }
+        broadcastManualTaskCreated(task);
+        return;
+      }
+      case 'backend_manual_tasks': {
+        if (!requireAuth(client, msg)) return;
+        const tasks = normalizeManualTasks(msg.tasks);
+        if (!tasks) {
+          sendError(client, 'invalid_message', 'invalid manual tasks payload', {
+            ...(msg.id !== undefined ? { id: msg.id } : {}),
+          });
+          return;
+        }
+        broadcastManualTasks(tasks);
         return;
       }
       case 'create_session': {

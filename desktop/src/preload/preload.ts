@@ -92,6 +92,11 @@ export interface GoogleCalendarAuthResult {
   status: GoogleCalendarStatus;
 }
 
+export interface SlackAuthStatus {
+  ok: boolean;
+  message: string;
+}
+
 export interface SessionState {
   id?: string;
   name: string;
@@ -108,6 +113,25 @@ export interface ManualTask {
   text: string;
   createdAt: number;
   priority?: number;
+}
+
+export interface SlackNotification {
+  id: string;
+  teamId?: string;
+  teamName?: string;
+  channelId?: string;
+  channelName?: string;
+  channelType?: string;
+  userId?: string;
+  userName?: string;
+  text: string;
+  ts?: string;
+  threadTs?: string;
+  permalink?: string;
+  receivedAt: number;
+  messageCount?: number;
+  priorityRank?: number;
+  priorityLabel?: 'mention' | 'dm' | 'thread_mention' | 'thread_written' | 'other';
 }
 
 export type RecurringTaskFrequency = 'weekly' | 'daily' | 'interval' | 'monthly';
@@ -188,6 +212,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('manual-task:list-update', (_event, tasks: ManualTask[]) => cb(tasks));
   },
 
+  getSlackNotifications: (): Promise<SlackNotification[]> =>
+    ipcRenderer.invoke('slack-notification:list'),
+
+  openSlackNotification: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('slack-notification:open', id),
+
+  removeSlackNotification: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('slack-notification:remove', id),
+
+  clearSlackNotifications: (): Promise<boolean> =>
+    ipcRenderer.invoke('slack-notification:clear'),
+
+  onSlackNotification: (cb: (notification: SlackNotification) => void): void => {
+    ipcRenderer.on('slack:notification', (_event, notification: SlackNotification) => cb(notification));
+  },
+
+  onSlackListUpdate: (cb: (notifications: SlackNotification[]) => void): void => {
+    ipcRenderer.on('slack:list-update', (_event, notifications: SlackNotification[]) => cb(notifications));
+  },
+
   getRecurringTasks: (): Promise<RecurringTask[]> =>
     ipcRenderer.invoke('recurring-task:list'),
 
@@ -224,6 +268,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   onGoogleCalendarStatusUpdate: (cb: (status: GoogleCalendarStatus) => void): void => {
     ipcRenderer.on('google-calendar:status-update', (_event, status: GoogleCalendarStatus) => cb(status));
+  },
+
+  startSlackAuth: (): Promise<SlackAuthStatus> =>
+    ipcRenderer.invoke('slack:auth:start'),
+
+  onSlackAuthStatus: (cb: (status: SlackAuthStatus) => void): void => {
+    ipcRenderer.on('slack:auth-status', (_event, status: SlackAuthStatus) => cb(status));
   },
 
   getSettings: (): Promise<AppSettings> =>

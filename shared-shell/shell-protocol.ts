@@ -1,3 +1,5 @@
+import type { ManualTaskState } from '../shared/settings';
+
 export interface SessionInfo {
   sessionId: string;
   pid: number;
@@ -90,7 +92,9 @@ export type ClientMessage =
   | { type: 'kill'; id?: string; sessionId: string; signal?: string }
   | { type: 'rename_session'; id?: string; sessionId: string; name: string }
   | { type: 'remove_session'; id?: string; sessionId: string }
-  | { type: 'touch_session'; id?: string; sessionId: string };
+  | { type: 'touch_session'; id?: string; sessionId: string }
+  | { type: 'backend_manual_task_added'; id?: string; task: unknown }
+  | { type: 'backend_manual_tasks'; id?: string; tasks: unknown };
 
 export type ServerMessage =
   | {
@@ -149,6 +153,8 @@ export type ServerMessage =
   | { type: 'desktop_session_created'; id?: string; session: unknown }
   | { type: 'desktop_session_updated'; id?: string; session: unknown }
   | { type: 'desktop_session_removed'; id?: string; sessionId: string }
+  | { type: 'manual_task_created'; id?: string; task: ManualTaskState }
+  | { type: 'manual_tasks'; id?: string; tasks: ManualTaskState[] }
   | {
       type: 'error';
       id?: string;

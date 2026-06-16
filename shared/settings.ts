@@ -446,7 +446,7 @@ function normalizeWindowState(value: unknown): WindowState | null {
   };
 }
 
-function normalizeSlackNotification(value: unknown): SlackNotificationState | null {
+export function normalizeSlackNotification(value: unknown): SlackNotificationState | null {
   if (!isRecord(value)) return null;
 
   const id = readTrimmedString(value, 'id');

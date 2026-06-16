@@ -1,0 +1,800 @@
+{
+  "id": "c7d5b699-33e7-430b-b4e1-3a5212470400",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.app_settings": {
+      "name": "app_settings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "'default'"
+        },
+        "settings": {
+          "name": "settings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.google_calendar_connections": {
+      "name": "google_calendar_connections",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "account_email": {
+          "name": "account_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "account_name": {
+          "name": "account_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "calendar_id": {
+          "name": "calendar_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "look_ahead_days": {
+          "name": "look_ahead_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "connected_at": {
+          "name": "connected_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_synced_at": {
+          "name": "last_synced_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "auth_error": {
+          "name": "auth_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "auth": {
+          "name": "auth",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "google_calendar_connections_enabled_idx": {
+          "name": "google_calendar_connections_enabled_idx",
+          "columns": [
+            {
+              "expression": "enabled",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.google_calendar_events": {
+      "name": "google_calendar_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_email": {
+          "name": "account_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "account_name": {
+          "name": "account_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "calendar_id": {
+          "name": "calendar_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "summary": {
+          "name": "summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "start": {
+          "name": "start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "end": {
+          "name": "end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "start_ms": {
+          "name": "start_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "end_ms": {
+          "name": "end_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "all_day": {
+          "name": "all_day",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "html_link": {
+          "name": "html_link",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "location": {
+          "name": "location",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated": {
+          "name": "updated",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "google_calendar_events_connection_idx": {
+          "name": "google_calendar_events_connection_idx",
+          "columns": [
+            {
+              "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "google_calendar_events_start_ms_idx": {
+          "name": "google_calendar_events_start_ms_idx",
+          "columns": [
+            {
+              "expression": "start_ms",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.manual_tasks": {
+      "name": "manual_tasks",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "priority": {
+          "name": "priority",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "manual_tasks_created_at_idx": {
+          "name": "manual_tasks_created_at_idx",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.recurring_tasks": {
+      "name": "recurring_tasks",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "time": {
+          "name": "time",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "frequency": {
+          "name": "frequency",
+          "type": "recurring_task_frequency",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'weekly'"
+        },
+        "days_of_week": {
+          "name": "days_of_week",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "interval_days": {
+          "name": "interval_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "day_of_month": {
+          "name": "day_of_month",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "anchor_date": {
+          "name": "anchor_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "priority": {
+          "name": "priority",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "last_generated_date": {
+          "name": "last_generated_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "recurring_tasks_enabled_idx": {
+          "name": "recurring_tasks_enabled_idx",
+          "columns": [
+            {
+              "expression": "enabled",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "recurring_tasks_created_at_idx": {
+          "name": "recurring_tasks_created_at_idx",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.sessions": {
+      "name": "sessions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cmd": {
+          "name": "cmd",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cwd": {
+          "name": "cwd",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shell_type": {
+          "name": "shell_type",
+          "type": "shell_type",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ssh_command": {
+          "name": "ssh_command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ssh_options": {
+          "name": "ssh_options",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "terminal_ref": {
+          "name": "terminal_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "terminal_pid": {
+          "name": "terminal_pid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_metadata": {
+          "name": "client_metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "session_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'needs_attention'"
+        },
+        "last_activity": {
+          "name": "last_activity",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "git_changes": {
+          "name": "git_changes",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "terminal_exit_code": {
+          "name": "terminal_exit_code",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "terminal_exit_reason": {
+          "name": "terminal_exit_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "terminal_capture_state": {
+          "name": "terminal_capture_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "terminal_capture_reason": {
+          "name": "terminal_capture_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "sessions_status_idx": {
+          "name": "sessions_status_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "sessions_terminal_ref_idx": {
+          "name": "sessions_terminal_ref_idx",
+          "columns": [
+            {
+              "expression": "terminal_ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.slack_notifications": {
+      "name": "slack_notifications",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "team_id": {
+          "name": "team_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "team_name": {
+          "name": "team_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "channel_id": {
+          "name": "channel_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "channel_name": {
+          "name": "channel_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "channel_type": {
+          "name": "channel_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_name": {
+          "name": "user_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ts": {
+          "name": "ts",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "thread_ts": {
+          "name": "thread_ts",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "permalink": {
+          "name": "permalink",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message_count": {
+          "name": "message_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "priority_rank": {
+          "name": "priority_rank",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "priority_label": {
+          "name": "priority_label",
+          "type": "slack_notification_priority_label",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "slack_notifications_received_at_idx": {
+          "name": "slack_notifications_received_at_idx",
+          "columns": [
+            {
+              "expression": "received_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "slack_notifications_channel_idx": {
+          "name": "slack_notifications_channel_idx",
+          "columns": [
+            {
+              "expression": "team_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "channel_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {
+    "public.recurring_task_frequency": {
+      "name": "recurring_task_frequency",
+      "schema": "public",
+      "values": [
+        "weekly",
+        "daily",
+        "interval",
+        "monthly"
+      ]
+    },
+    "public.session_status": {
+      "name": "session_status",
+      "schema": "public",
+      "values": [
+        "waiting",
+        "starting",
+        "running",
+        "needs_attention",
+        "paused",
+        "error",
+        "stopped",
+        "detached"
+      ]
+    },
+    "public.shell_type": {
+      "name": "shell_type",
+      "schema": "public",
+      "values": [
+        "powershell",
+        "bash",
+        "ssh"
+      ]
+    },
+    "public.slack_notification_priority_label": {
+      "name": "slack_notification_priority_label",
+      "schema": "public",
+      "values": [
+        "mention",
+        "dm",
+        "thread_mention",
+        "thread_written",
+        "other"
+      ]
+    }
+  },
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

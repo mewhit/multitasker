@@ -4,6 +4,8 @@ import { closeSseClients, broadcastSseEvent } from './core/sse';
 import { getBackendState } from './core/backend-state';
 import { Router } from './core/router';
 import type { RouteDef } from './core/types';
+import { getErrorMessage } from './core/util';
+import { closeDatabase } from './db';
 import { sessionManager } from './state/sessions';
 import { modules } from './modules';
 import { restorePersistedState } from './modules/sessions/persistence';
@@ -49,6 +51,9 @@ function shutdown(): void {
   disposeModules();
   closeSseClients();
   stopHttpServer();
+  void closeDatabase().catch(error => {
+    console.error(`Failed to close Multitasker database connection: ${getErrorMessage(error)}`);
+  });
 }
 
 // Register signal handlers for graceful shutdown

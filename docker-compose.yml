@@ -1,0 +1,17 @@
+services:
+  multitasker-postgres:
+    image: ankane/pgvector:latest
+    restart: always
+    environment:
+      POSTGRES_USER: multitasker
+      POSTGRES_PASSWORD: multitasker
+      POSTGRES_DB: multitasker
+    ports:
+      - "5432:5432"
+    volumes:
+      - multitasker_pg_data:/var/lib/postgresql/data
+
+volumes:
+  multitasker_pg_data:
+  multitasker_caddy_data:
+  multitasker_caddy_config:

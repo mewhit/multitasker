@@ -1,32 +1,32 @@
 [
   {
-    "id": "14224c87-ff5b-4382-b391-f38cdf2ca45c",
-    "name": "server",
+    "id": "e0df5d82-e9cc-4cbd-ac7b-f7129103881a",
+    "name": "multitasker",
     "cmd": "",
-    "cwd": "C:\\dev\\happyhead\\backoffice\\server",
+    "cwd": "C:\\dev\\multitasker",
     "shellType": "powershell",
     "clientMetadata": {
       "kind": "vscode",
-      "workspace": "C:\\dev\\happyhead\\backoffice\\server",
+      "workspace": "C:\\dev\\multitasker",
       "version": "1.122.1",
       "termProgram": "vscode"
     }
   },
   {
-    "id": "6a987172-9e35-4726-8d40-d88b966d3083",
-    "name": "erp",
+    "id": "0d3baddc-5d5f-4bf2-9197-4a265ca49d3f",
+    "name": "happyhead",
     "cmd": "",
-    "cwd": "C:\\dev\\erp",
+    "cwd": "C:\\dev\\happyhead",
     "shellType": "powershell",
     "clientMetadata": {
       "kind": "vscode",
-      "workspace": "C:\\dev\\erp",
+      "workspace": "C:\\dev\\happyhead",
       "version": "1.122.1",
       "termProgram": "vscode"
     }
   },
   {
-    "id": "ba62be1b-70cf-4ebf-90fa-800116e5a126",
+    "id": "4f5eb3f3-6d1f-4dc7-8f8e-b89ad745a1b0",
     "name": "server",
     "cmd": "",
     "cwd": "C:\\dev\\happyhead\\backoffice\\server",

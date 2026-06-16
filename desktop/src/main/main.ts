@@ -1596,6 +1596,9 @@ function parseSlackEvent(payload: unknown): SlackEventParseResult {
 }
 
 function shouldCreateSlackNotificationForEvent(event: Record<string, unknown>): boolean {
+  const slackUserId = readSlackConfigValue("SLACK_USER_ID");
+  if (isSlackEventSentByAuthedUser(event, slackUserId)) return false;
+
   const eventType = readStringField(event, "type").trim();
   if (eventType === "app_mention") return true;
   if (eventType !== "message") return false;
@@ -1607,9 +1610,14 @@ function shouldCreateSlackNotificationForEvent(event: Record<string, unknown>): 
   const channelId = readStringField(event, "channel").trim();
   if (channelType === "im" || channelType === "mpim" || channelId.startsWith("D")) return true;
 
-  const slackUserId = readSlackConfigValue("SLACK_USER_ID");
   const text = readStringField(event, "text");
   return Boolean(slackUserId && text.includes(`<@${slackUserId}>`));
+}
+
+function isSlackEventSentByAuthedUser(event: Record<string, unknown>, slackUserId: string): boolean {
+  if (!slackUserId) return false;
+  const senderUserId = readStringField(event, "user").trim();
+  return Boolean(senderUserId && senderUserId === slackUserId);
 }
 
 function getSlackNotificationId(identity: {

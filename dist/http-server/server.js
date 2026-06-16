@@ -5,6 +5,8 @@ const http_server_1 = require("./core/http-server");
 const sse_1 = require("./core/sse");
 const backend_state_1 = require("./core/backend-state");
 const router_1 = require("./core/router");
+const util_1 = require("./core/util");
+const db_1 = require("./db");
 const sessions_1 = require("./state/sessions");
 const modules_1 = require("./modules");
 const persistence_1 = require("./modules/sessions/persistence");
@@ -12,6 +14,7 @@ const persistence_1 = require("./modules/sessions/persistence");
 sessions_1.sessionManager.on('sessionUpdate', (sessions) => {
     (0, sse_1.broadcastSseEvent)('session:list-update', sessions);
     (0, sse_1.broadcastSseEvent)('state', (0, backend_state_1.getBackendState)());
+    (0, sse_1.broadcastSseEvent)('next-up:list-update', (0, backend_state_1.getBackendNextUpItems)());
 });
 // Restore persisted state (sessions, tasks, notifications)
 (0, persistence_1.restorePersistedState)();
@@ -43,6 +46,9 @@ function shutdown() {
     disposeModules();
     (0, sse_1.closeSseClients)();
     (0, http_server_1.stopHttpServer)();
+    void (0, db_1.closeDatabase)().catch(error => {
+        console.error(`Failed to close Multitasker database connection: ${(0, util_1.getErrorMessage)(error)}`);
+    });
 }
 // Register signal handlers for graceful shutdown
 process.on('SIGINT', shutdown);

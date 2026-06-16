@@ -320,9 +320,16 @@ function taskPriority(task: ManualTaskState): number {
 }
 
 function notificationTitle(notification: SlackNotificationState): string {
-  if (notification.channelName) return `#${notification.channelName}`;
-  if (notification.userName) return notification.userName;
-  return 'Slack';
+  const channelType = notification.channelType?.trim().toLowerCase() ?? '';
+  const isDirectMessage = channelType === 'im' || channelType === 'mpim' || notification.channelId?.trim().startsWith('D') === true;
+  const channelName = displaySlackChannelName(notification.channelName?.trim() ?? '');
+  const userName = displaySlackUserName(notification.userName?.trim() ?? '');
+  const channelId = displaySlackChannelName(notification.channelId?.trim() ?? '');
+  const userId = displaySlackUserName(notification.userId?.trim() ?? '');
+  const groupOrPersonName = isDirectMessage
+    ? userName || channelName || userId || channelId || 'Direct message'
+    : channelName || userName || channelId || userId || 'Notification';
+  return `Slack - ${groupOrPersonName}`;
 }
 
 function slackPriority(notification: SlackNotificationState): number {
@@ -357,6 +364,29 @@ function normalizeSlackNextUpOrder(order: string[], defaultIndex: Map<string, nu
     slackIndex += 1;
     return nextKey ?? key;
   });
+}
+
+function displaySlackChannelName(value: string): string {
+  if (!value || isGenericSlackDmLabel(value) || isRawSlackChannelId(value)) return '';
+  return value;
+}
+
+function displaySlackUserName(value: string): string {
+  if (!value || isRawSlackUserId(value)) return '';
+  return value;
+}
+
+function isGenericSlackDmLabel(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'dm' || normalized === 'direct message';
+}
+
+function isRawSlackChannelId(value: string): boolean {
+  return /^[CDG][A-Z0-9]{8,}$/.test(value);
+}
+
+function isRawSlackUserId(value: string): boolean {
+  return /^[UW][A-Z0-9]{8,}$/.test(value);
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

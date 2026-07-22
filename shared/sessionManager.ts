@@ -178,8 +178,11 @@ export class SessionManager extends EventEmitter {
     const entry = this.sessions.get(update.id);
     if (!entry) return null;
     if (entry.session.status === 'detached') return { ...entry.session };
-    if (entry.session.status === 'paused' && update.status !== 'running') return { ...entry.session };
     if (update.occurredAt < entry.lastTerminalUpdateAt) return { ...entry.session };
+    if (entry.session.status === 'paused') {
+      entry.lastTerminalUpdateAt = update.occurredAt;
+      return { ...entry.session };
+    }
 
     return this.applyTerminalUpdate(entry, update);
   }
@@ -209,7 +212,7 @@ export class SessionManager extends EventEmitter {
       return { session: { ...entry.session } };
     }
 
-    if (entry.session.status === 'paused' && update.status !== 'running') {
+    if (entry.session.status === 'paused') {
       entry.lastTerminalUpdateAt = event.occurredAt;
       if (bindingChanged) this.emitUpdateDebounced();
       return { session: { ...entry.session } };
@@ -238,6 +241,20 @@ export class SessionManager extends EventEmitter {
     entry.statusChangedAt = now;
     entry.lastEffectiveUpdateAt = now;
     this.emit('sessionUpdate', this.getSessions());
+    return { ...entry.session };
+  }
+
+  resumePausedSessionFromUserInput(id: string, occurredAt = Date.now()): Session | null {
+    const entry = this.sessions.get(id);
+    if (!entry) return null;
+    if (entry.session.status !== 'paused') return { ...entry.session };
+
+    entry.session.status = 'needs_attention';
+    entry.session.lastActivity = occurredAt;
+    entry.statusChangedAt = occurredAt;
+    entry.lastEffectiveUpdateAt = Math.max(entry.lastEffectiveUpdateAt, occurredAt, Date.now());
+    this.emit('sessionUpdate', this.getSessions());
+    this.scheduleGitChangesCheck(entry);
     return { ...entry.session };
   }
 

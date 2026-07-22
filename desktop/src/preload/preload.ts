@@ -98,6 +98,12 @@ export interface SlackAuthStatus {
   message: string;
 }
 
+export interface TerminalClipboardPaste {
+  source: 'image' | 'text' | 'empty';
+  text: string;
+  filePath?: string;
+}
+
 export interface SessionState {
   id?: string;
   name: string;
@@ -133,6 +139,22 @@ export interface SlackNotification {
   messageCount?: number;
   priorityRank?: number;
   priorityLabel?: 'mention' | 'dm' | 'thread_mention' | 'thread_written' | 'other';
+}
+
+export interface SlackHistoryMessage {
+  ts: string;
+  text: string;
+  userId?: string;
+  userName: string;
+  sentAt: number;
+  selected: boolean;
+}
+
+export interface SlackConversationHistory {
+  notificationId: string;
+  title: string;
+  kind: 'thread' | 'channel';
+  messages: SlackHistoryMessage[];
 }
 
 export type RecurringTaskFrequency = 'weekly' | 'daily' | 'interval' | 'monthly';
@@ -177,6 +199,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getShellServerConfig: (): Promise<{ url: string; token: string }> =>
     ipcRenderer.invoke('shell:get-config'),
+
+  readTerminalClipboard: (): Promise<TerminalClipboardPaste> =>
+    ipcRenderer.invoke('clipboard:read-terminal-paste'),
 
   removeSession: (id: string): Promise<void> =>
     ipcRenderer.invoke('session:remove', id),
@@ -228,6 +253,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getSlackNotifications: (): Promise<SlackNotification[]> =>
     ipcRenderer.invoke('slack-notification:list'),
+
+  getSlackConversationHistory: (id: string): Promise<SlackConversationHistory> =>
+    ipcRenderer.invoke('slack-notification:history', id),
 
   openSlackNotification: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('slack-notification:open', id),

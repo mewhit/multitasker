@@ -11,6 +11,7 @@ import { terminalsModule } from './terminals';
 import { sessionsModule } from './sessions';
 import { slackModule } from './slack';
 import { databaseModule } from './database';
+import { textModule } from './text';
 export const modules: HttpModule[] = [
   healthModule,
   databaseModule,
@@ -24,4 +25,5 @@ export const modules: HttpModule[] = [
   terminalsModule,
   sessionsModule,
   slackModule,
+  textModule,
 ];

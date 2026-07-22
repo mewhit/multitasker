@@ -29,6 +29,8 @@ type SlackEventResult =
 const slackUserNameCache = new Map<string, string>();
 const slackChannelNameCache = new Map<string, string>();
 const slackChannelPeerUserIdCache = new Map<string, string>();
+const slackThreadsWrittenByAuthedUser = new Set<string>();
+const SLACK_WORKSPACES_RELATIVE_PATH = path.join('extension', 'slack', 'workspaces.json');
 
 export const slackModule: HttpModule = {
   name: 'slack',
@@ -118,13 +120,18 @@ async function parseSlackEvent(payload: unknown): Promise<SlackEventResult> {
 
   const event = isRecord(eventPayload['event']) ? eventPayload['event'] : undefined;
   if (!event) return { kind: 'skipped', reason: 'missing_event' };
+  const teamId = readStringField(eventPayload, 'team_id').trim() || readStringField(payload, 'team_id').trim();
+  if (!isSlackWorkspaceConnected(teamId)) return { kind: 'skipped', reason: 'workspace_not_connected' };
   const authedUserIds = getSlackAuthedUserIds(eventPayload, payload);
-  if (!shouldCreateSlackNotificationForEvent(event, authedUserIds)) return { kind: 'skipped', reason: 'not_actionable' };
+  const workspaceUserId = getSlackWorkspaceUserId(teamId);
+  if (workspaceUserId) authedUserIds.add(workspaceUserId);
+  if (!await shouldCreateSlackNotificationForEvent(event, authedUserIds, teamId)) {
+    return { kind: 'skipped', reason: 'not_actionable' };
+  }
 
-  const text = normalizeSlackText(readStringField(event, 'text'));
+  const text = normalizeSlackText(readStringField(event, 'text')) || readSlackFallbackText(event);
   if (!text) return { kind: 'skipped', reason: 'missing_text' };
 
-  const teamId = readStringField(eventPayload, 'team_id').trim() || readStringField(payload, 'team_id').trim();
   const channelId = readStringField(event, 'channel').trim();
   const channelType = readStringField(event, 'channel_type').trim();
   const userId = readStringField(event, 'user').trim() || readStringField(event, 'bot_id').trim();
@@ -162,22 +169,72 @@ async function parseSlackEvent(payload: unknown): Promise<SlackEventResult> {
   };
 }
 
-function shouldCreateSlackNotificationForEvent(event: Record<string, unknown>, authedUserIds: ReadonlySet<string>): boolean {
-  if (isSlackEventSentByAuthedUser(event, authedUserIds)) return false;
+async function shouldCreateSlackNotificationForEvent(
+  event: Record<string, unknown>,
+  authedUserIds: ReadonlySet<string>,
+  teamId: string
+): Promise<boolean> {
+  if (isSlackEventSentByAuthedUser(event, authedUserIds)) {
+    rememberSlackThreadWrittenByAuthedUser(event, teamId);
+    return false;
+  }
 
   const eventType = readStringField(event, 'type').trim();
   if (eventType === 'app_mention') return true;
   if (eventType !== 'message') return false;
 
   const subtype = readStringField(event, 'subtype').trim();
-  if (subtype) return false;
+  if (subtype && subtype !== 'file_share') return false;
 
   const channelType = readStringField(event, 'channel_type').trim();
   const channelId = readStringField(event, 'channel').trim();
   if (channelType === 'im' || channelType === 'mpim' || channelId.startsWith('D')) return true;
 
   const text = readStringField(event, 'text');
-  return isMessageMentioningAuthedUser(text, authedUserIds);
+  if (isMessageMentioningAuthedUser(text, authedUserIds)) return true;
+
+  const threadTs = readStringField(event, 'thread_ts').trim();
+  return Boolean(threadTs && channelId && await wasSlackThreadWrittenByAuthedUser(
+    teamId,
+    channelId,
+    threadTs,
+    authedUserIds
+  ));
+}
+
+function rememberSlackThreadWrittenByAuthedUser(event: Record<string, unknown>, teamId: string): void {
+  if (readStringField(event, 'type').trim() !== 'message') return;
+  const channelId = readStringField(event, 'channel').trim();
+  const threadTs = readStringField(event, 'thread_ts').trim();
+  if (channelId && threadTs) slackThreadsWrittenByAuthedUser.add(slackThreadKey(teamId, channelId, threadTs));
+}
+
+async function wasSlackThreadWrittenByAuthedUser(
+  teamId: string,
+  channelId: string,
+  threadTs: string,
+  authedUserIds: ReadonlySet<string>
+): Promise<boolean> {
+  const key = slackThreadKey(teamId, channelId, threadTs);
+  if (slackThreadsWrittenByAuthedUser.has(key)) return true;
+
+  const response = await callSlackApi('conversations.replies', {
+    channel: channelId,
+    ts: threadTs,
+    limit: '100',
+  }, teamId);
+  const messages = Array.isArray(response?.['messages']) ? response['messages'] : [];
+  const participated = messages.some(message => {
+    if (!isRecord(message)) return false;
+    const userId = readStringField(message, 'user').trim();
+    return Boolean(userId && authedUserIds.has(userId));
+  });
+  if (participated) slackThreadsWrittenByAuthedUser.add(key);
+  return participated;
+}
+
+function slackThreadKey(teamId: string, channelId: string, threadTs: string): string {
+  return `${teamId}:${channelId}:${threadTs}`;
 }
 
 function isSlackEventSentByAuthedUser(event: Record<string, unknown>, authedUserIds: ReadonlySet<string>): boolean {
@@ -246,8 +303,11 @@ function slackNotificationPriority(
 ): { rank: number; label: NonNullable<SlackNotificationState['priorityLabel']> } {
   if (channelType === 'im' || channelType === 'mpim') return { rank: 0, label: 'dm' };
   const text = readStringField(event, 'text');
-  if (isMessageMentioningAuthedUser(text, authedUserIds)) return { rank: 1, label: 'mention' };
-  if (readStringField(event, 'type').trim() === 'app_mention') return { rank: 1, label: 'mention' };
+  const isThreadReply = Boolean(readStringField(event, 'thread_ts').trim());
+  if (isMessageMentioningAuthedUser(text, authedUserIds) || readStringField(event, 'type').trim() === 'app_mention') {
+    return isThreadReply ? { rank: 2, label: 'thread_mention' } : { rank: 1, label: 'mention' };
+  }
+  if (isThreadReply) return { rank: 3, label: 'thread_written' };
   return { rank: 4, label: 'other' };
 }
 
@@ -300,18 +360,18 @@ function readSlackUserDisplayName(event: Record<string, unknown>): string {
 
 async function enrichSlackNotification(notification: SlackNotificationState): Promise<void> {
   if (!notification.teamName) {
-    const teamName = getSlackEnvValue('SLACK_TEAM_NAME');
+    const teamName = getSlackWorkspace(notification.teamId)?.teamName || getSlackEnvValue('SLACK_TEAM_NAME');
     if (teamName) notification.teamName = teamName;
   }
 
   if (notification.channelId && (!notification.channelName || isGenericDmLabel(notification.channelName))) {
-    const channel = await resolveSlackChannelMetadata(notification.channelId);
+    const channel = await resolveSlackChannelMetadata(notification.channelId, notification.teamId);
     if (channel.channelName) notification.channelName = channel.channelName;
     if (!notification.userId && channel.peerUserId) notification.userId = channel.peerUserId;
   }
 
   if (notification.userId && !notification.userName) {
-    notification.userName = await resolveSlackUserName(notification.userId);
+    notification.userName = await resolveSlackUserName(notification.userId, notification.teamId);
   }
 
   if (notification.channelType === 'im' && (!notification.channelName || isGenericDmLabel(notification.channelName)) && notification.userName) {
@@ -319,22 +379,23 @@ async function enrichSlackNotification(notification: SlackNotificationState): Pr
   }
 }
 
-async function resolveSlackChannelMetadata(channelId: string): Promise<{ channelName: string; peerUserId: string }> {
-  const cachedChannelName = slackChannelNameCache.get(channelId) ?? '';
-  const cachedPeerUserId = slackChannelPeerUserIdCache.get(channelId) ?? '';
+async function resolveSlackChannelMetadata(channelId: string, teamId?: string): Promise<{ channelName: string; peerUserId: string }> {
+  const cacheKey = `${teamId ?? ''}:${channelId}`;
+  const cachedChannelName = slackChannelNameCache.get(cacheKey) ?? '';
+  const cachedPeerUserId = slackChannelPeerUserIdCache.get(cacheKey) ?? '';
   if (cachedChannelName || cachedPeerUserId) {
     return { channelName: cachedChannelName, peerUserId: cachedPeerUserId };
   }
 
-  const response = await callSlackApi('conversations.info', { channel: channelId });
+  const response = await callSlackApi('conversations.info', { channel: channelId }, teamId);
   const channel = isRecord(response?.['channel']) ? response['channel'] : undefined;
   if (!channel) return { channelName: '', peerUserId: '' };
 
   const channelName = readStringField(channel, 'name').trim();
-  if (channelName) slackChannelNameCache.set(channelId, channelName);
+  if (channelName) slackChannelNameCache.set(cacheKey, channelName);
 
   const peerUserId = readStringField(channel, 'user').trim();
-  if (peerUserId) slackChannelPeerUserIdCache.set(channelId, peerUserId);
+  if (peerUserId) slackChannelPeerUserIdCache.set(cacheKey, peerUserId);
 
   return {
     channelName,
@@ -342,11 +403,12 @@ async function resolveSlackChannelMetadata(channelId: string): Promise<{ channel
   };
 }
 
-async function resolveSlackUserName(userId: string): Promise<string> {
-  const cachedUserName = slackUserNameCache.get(userId);
+async function resolveSlackUserName(userId: string, teamId?: string): Promise<string> {
+  const cacheKey = `${teamId ?? ''}:${userId}`;
+  const cachedUserName = slackUserNameCache.get(cacheKey);
   if (cachedUserName) return cachedUserName;
 
-  const response = await callSlackApi('users.info', { user: userId });
+  const response = await callSlackApi('users.info', { user: userId }, teamId);
   const user = isRecord(response?.['user']) ? response['user'] : undefined;
   if (!user) return '';
   const profile = isRecord(user['profile']) ? user['profile'] : undefined;
@@ -354,12 +416,12 @@ async function resolveSlackUserName(userId: string): Promise<string> {
     readStringField(profile ?? {}, 'real_name').trim() ||
     readStringField(user, 'real_name').trim() ||
     readStringField(user, 'name').trim();
-  if (userName) slackUserNameCache.set(userId, userName);
+  if (userName) slackUserNameCache.set(cacheKey, userName);
   return userName;
 }
 
-async function callSlackApi(method: string, query: Record<string, string>): Promise<Record<string, unknown> | null> {
-  const token = getSlackApiToken();
+async function callSlackApi(method: string, query: Record<string, string>, teamId?: string): Promise<Record<string, unknown> | null> {
+  const token = getSlackApiToken(teamId);
   if (!token) return null;
 
   const url = new URL(`https://slack.com/api/${method}`);
@@ -396,18 +458,87 @@ async function callSlackApi(method: string, query: Record<string, string>): Prom
   }
 }
 
-function getSlackApiToken(): string {
-  return getSlackEnvValue('SLACK_USER_TOKEN') || getSlackEnvValue('SLACK_BOT_TOKEN');
+function getSlackApiToken(teamId?: string): string {
+  const workspace = getSlackWorkspace(teamId);
+  return workspace?.userToken || workspace?.botToken || getSlackEnvValue('SLACK_USER_TOKEN') || getSlackEnvValue('SLACK_BOT_TOKEN');
+}
+
+interface StoredSlackWorkspace {
+  teamId: string;
+  teamName: string;
+  userId: string;
+  userToken: string;
+  botToken: string;
+}
+
+function getSlackWorkspace(teamId?: string): StoredSlackWorkspace | undefined {
+  const filePath = path.join(process.cwd(), SLACK_WORKSPACES_RELATIVE_PATH);
+  if (!fs.existsSync(filePath)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!Array.isArray(parsed)) return undefined;
+    const workspaces = parsed.flatMap((value): StoredSlackWorkspace[] => {
+      if (!isRecord(value)) return [];
+      const storedTeamId = readStringField(value, 'teamId').trim();
+      const userToken = readStringField(value, 'userToken').trim();
+      const botToken = readStringField(value, 'botToken').trim();
+      if (!storedTeamId || (!userToken && !botToken)) return [];
+      return [{
+        teamId: storedTeamId,
+        teamName: readStringField(value, 'teamName').trim() || storedTeamId,
+        userId: readStringField(value, 'userId').trim(),
+        userToken,
+        botToken,
+      }];
+    });
+    return teamId ? workspaces.find((workspace) => workspace.teamId === teamId) : workspaces[0];
+  } catch {
+    return undefined;
+  }
+}
+
+function isSlackWorkspaceConnected(teamId: string): boolean {
+  const filePath = path.join(process.cwd(), SLACK_WORKSPACES_RELATIVE_PATH);
+  if (!fs.existsSync(filePath)) return true;
+  return Boolean(teamId && getSlackWorkspace(teamId));
+}
+
+function getSlackWorkspaceUserId(teamId?: string): string {
+  return getSlackWorkspace(teamId)?.userId ?? '';
 }
 
 function isGenericDmLabel(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return normalized === 'dm' || normalized === 'direct message';
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, ' ');
+  return normalized === 'dm' ||
+    normalized === 'direct message' ||
+    normalized === 'dm message' ||
+    /(^|[\s-])dm message$/.test(normalized);
 }
 
 function truncateSlackText(text: string): string {
   if (text.length <= MAX_SLACK_TEXT_LENGTH) return text;
   return `${text.slice(0, MAX_SLACK_TEXT_LENGTH - 1)}…`;
+}
+
+function readSlackFallbackText(event: Record<string, unknown>): string {
+  const files = Array.isArray(event['files']) ? event['files'] : [];
+  for (const file of files) {
+    if (!isRecord(file)) continue;
+    const title = readStringField(file, 'title').trim();
+    const name = readStringField(file, 'name').trim();
+    const fallback = title || name;
+    if (fallback) return normalizeSlackText(`Shared file: ${fallback}`);
+  }
+
+  const blocks = Array.isArray(event['blocks']) ? event['blocks'] : [];
+  for (const block of blocks) {
+    if (!isRecord(block)) continue;
+    const textField = isRecord(block['text']) ? block['text'] : undefined;
+    const blockText = readStringField(textField ?? {}, 'text').trim();
+    if (blockText) return normalizeSlackText(blockText);
+  }
+
+  return '';
 }
 
 function normalizeSlackText(text: string): string {

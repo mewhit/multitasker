@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, screen, type BrowserWindowConstructorOptions, type Rectangle } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, dialog, shell, screen, type BrowserWindowConstructorOptions, type Rectangle } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { exec, spawn } from "node:child_process";
@@ -105,6 +105,7 @@ const GOOGLE_CALENDAR_TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
 const MAX_GOOGLE_CALENDAR_EVENTS = 100;
 const SLACK_OAUTH_SCRIPT_RELATIVE_PATH = path.join("extension", "slack", "src", "slack-oauth.js");
 const SLACK_ENV_RELATIVE_PATH = path.join("extension", "slack", ".env");
+const CLIPBOARD_IMAGE_DIRECTORY_NAME = "clipboard-images";
 
 interface GoogleCalendarStatus {
   connected: boolean;
@@ -146,6 +147,28 @@ interface GoogleCalendarAuthResult {
 interface SlackAuthStatus {
   ok: boolean;
   message: string;
+}
+
+interface SlackHistoryMessage {
+  ts: string;
+  text: string;
+  userId?: string;
+  userName: string;
+  sentAt: number;
+  selected: boolean;
+}
+
+interface SlackConversationHistory {
+  notificationId: string;
+  title: string;
+  kind: "thread" | "channel";
+  messages: SlackHistoryMessage[];
+}
+
+interface TerminalClipboardPaste {
+  source: "image" | "text" | "empty";
+  text: string;
+  filePath?: string;
 }
 
 interface GoogleTokenResponse {
@@ -769,6 +792,23 @@ function applyStandaloneBackendSessions(payload: unknown): void {
   if (!sessions) return;
 
   standaloneBackendSessions = sessions.map(cloneSession);
+  syncBackendTerminalRefs(standaloneBackendSessions);
+  mainWindow?.webContents.send("session:list-update", standaloneBackendSessions.map(cloneSession));
+  invalidateStandaloneBackendNextUp();
+  broadcastNextUp();
+}
+
+function applyStandaloneBackendSession(session: Session): void {
+  if (!standaloneBackendSessions) return;
+
+  const nextSession = cloneSession(session);
+  const existingIndex = standaloneBackendSessions.findIndex((candidate) => candidate.id === nextSession.id);
+  if (existingIndex >= 0) {
+    standaloneBackendSessions.splice(existingIndex, 1, nextSession);
+  } else {
+    standaloneBackendSessions.unshift(nextSession);
+  }
+
   syncBackendTerminalRefs(standaloneBackendSessions);
   mainWindow?.webContents.send("session:list-update", standaloneBackendSessions.map(cloneSession));
   invalidateStandaloneBackendNextUp();
@@ -2663,6 +2703,119 @@ async function openSlackNotification(id: unknown): Promise<boolean> {
   }
 }
 
+async function getSlackConversationHistory(id: unknown): Promise<SlackConversationHistory> {
+  if (typeof id !== "string" || !id.trim()) throw new Error("Missing Slack notification id.");
+  const notification = slackNotifications.find((candidate) => candidate.id === id.trim());
+  if (!notification) throw new Error("This Slack task is no longer available.");
+
+  const channelId = notification.channelId?.trim() ?? "";
+  if (!channelId) throw new Error("This Slack task does not include a channel id.");
+
+  const threadTs = notification.threadTs?.trim() ?? "";
+  const method = threadTs ? "conversations.replies" : "conversations.history";
+  const query: Record<string, string> = { channel: channelId, limit: "100" };
+  if (threadTs) {
+    query.ts = threadTs;
+  } else if (notification.ts?.trim()) {
+    query.latest = notification.ts.trim();
+    query.inclusive = "true";
+  }
+
+  const response = await callSlackHistoryApi(method, query);
+  const rawMessages = Array.isArray(response["messages"])
+    ? response["messages"].filter(isRecord)
+    : [];
+  const userIds = [...new Set(rawMessages.map((message) => readStringField(message, "user").trim()).filter(Boolean))];
+  const userNames = new Map(await Promise.all(userIds.map(async (userId) => [userId, await resolveSlackHistoryUserName(userId)] as const)));
+  const selectedTs = notification.ts?.trim() ?? "";
+  const messages = rawMessages
+    .map((message): SlackHistoryMessage | null => {
+      const ts = readStringField(message, "ts").trim();
+      const text = normalizeSlackText(readStringField(message, "text"));
+      if (!ts || !text) return null;
+      const userId = readStringField(message, "user").trim();
+      const fallbackName = readStringField(message, "username").trim() || readStringField(message, "bot_id").trim() || "Slack";
+      const result: SlackHistoryMessage = {
+        ts,
+        text,
+        userName: userNames.get(userId) || fallbackName,
+        sentAt: parseSlackTimestampMs(ts) ?? 0,
+        selected: ts === selectedTs,
+      };
+      if (userId) result.userId = userId;
+      return result;
+    })
+    .filter((message): message is SlackHistoryMessage => message !== null)
+    .sort((a, b) => a.sentAt - b.sentAt);
+
+  const isDirectMessage = notification.channelType === "im" || channelId.startsWith("D");
+  const rawName = isDirectMessage
+    ? notification.userName?.trim() || notification.channelName?.trim() || channelId
+    : notification.channelName?.trim() || notification.userName?.trim() || channelId;
+  const title = threadTs ? `Slack thread - ${rawName}` : `Slack - ${rawName}`;
+  return { notificationId: notification.id, title, kind: threadTs ? "thread" : "channel", messages };
+}
+
+const slackHistoryUserNameCache = new Map<string, string>();
+
+async function resolveSlackHistoryUserName(userId: string): Promise<string> {
+  const cached = slackHistoryUserNameCache.get(userId);
+  if (cached) return cached;
+  try {
+    const response = await callSlackHistoryApi("users.info", { user: userId });
+    const user = isRecord(response["user"]) ? response["user"] : undefined;
+    const profile = user && isRecord(user["profile"]) ? user["profile"] : undefined;
+    const name = (profile && (readStringField(profile, "display_name").trim() || readStringField(profile, "real_name").trim()))
+      || (user && readStringField(user, "name").trim())
+      || userId;
+    slackHistoryUserNameCache.set(userId, name);
+    return name;
+  } catch {
+    return userId;
+  }
+}
+
+async function callSlackHistoryApi(method: string, query: Record<string, string>): Promise<Record<string, unknown>> {
+  const token = readSlackConfigValue("SLACK_USER_TOKEN") || readSlackConfigValue("SLACK_BOT_TOKEN");
+  if (!token) throw new Error("Slack is not authorized. Connect Slack from the add menu first.");
+  const url = new URL(`https://slack.com/api/${method}`);
+  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const payload: unknown = await response.json();
+  if (!response.ok || !isRecord(payload) || payload["ok"] !== true) {
+    const error = isRecord(payload) ? readStringField(payload, "error").trim() : "";
+    throw new Error(`Slack history could not be loaded${error ? `: ${error}` : "."}`);
+  }
+  return payload;
+}
+
+async function readTerminalClipboardPaste(): Promise<TerminalClipboardPaste> {
+  const image = clipboard.readImage();
+  if (!image.isEmpty()) {
+    const filePath = await saveClipboardImagePng(image.toPNG());
+    return { source: "image", text: formatTerminalPathArgument(filePath), filePath };
+  }
+
+  const text = clipboard.readText();
+  return text ? { source: "text", text } : { source: "empty", text: "" };
+}
+
+async function saveClipboardImagePng(png: Buffer): Promise<string> {
+  if (png.length === 0) throw new Error("Clipboard image could not be encoded as PNG.");
+
+  const directory = path.join(app.getPath("userData"), CLIPBOARD_IMAGE_DIRECTORY_NAME);
+  await fs.promises.mkdir(directory, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filePath = path.join(directory, `clipboard-${timestamp}-${randomBytes(4).toString("hex")}.png`);
+  await fs.promises.writeFile(filePath, png);
+  return filePath;
+}
+
+function formatTerminalPathArgument(filePath: string): string {
+  return /^[A-Za-z0-9_:\\./-]+$/.test(filePath) ? filePath : `"${filePath}"`;
+}
+
 function buildSlackExternalUrl(notification: SlackNotificationState): string {
   const channelId = notification.channelId?.trim() ?? "";
   const permalink = notification.permalink?.trim() ?? "";
@@ -2673,8 +2826,10 @@ function buildSlackExternalUrl(notification: SlackNotificationState): string {
   if (teamId) url.searchParams.set("team", teamId);
   url.searchParams.set("id", channelId);
 
-  const messageTs = notification.ts?.trim() || notification.threadTs?.trim() || "";
+  const threadTs = notification.threadTs?.trim() ?? "";
+  const messageTs = threadTs || notification.ts?.trim() || "";
   if (messageTs) url.searchParams.set("message", messageTs);
+  if (threadTs) url.searchParams.set("thread_ts", threadTs);
   return url.toString();
 }
 
@@ -2928,24 +3083,24 @@ function flushPendingTerminalEvents(id?: string): void {
 }
 
 async function startTerminalUpdateServer(): Promise<void> {
-  if (isEnvFlagEnabled(DISABLE_LEGACY_TERMINAL_SERVER_ENV)) {
-    debugTerminalUpdate("legacy terminal update server disabled by environment", {
-      env: DISABLE_LEGACY_TERMINAL_SERVER_ENV,
+  if (!isEnvFlagEnabled(DISABLE_LEGACY_TERMINAL_SERVER_ENV)) {
+    console.warn(
+      `${DISABLE_LEGACY_TERMINAL_SERVER_ENV} is no longer required: legacy terminal/slack server fallback is disabled.`,
+    );
+  }
+
+  startStandaloneBackendSync();
+  if (await waitForStandaloneBackend(BACKEND_STARTUP_WAIT_MS)) {
+    debugTerminalUpdate("standalone backend sync enabled", {
       backendUrl: backendUrl(BACKEND_HEALTH_PATH),
     });
-    startStandaloneBackendSync();
     return;
   }
 
-  if (process.env["NODE_ENV"] === "development" && await waitForStandaloneBackend(BACKEND_STARTUP_WAIT_MS)) {
-    debugTerminalUpdate("legacy terminal update server skipped; standalone backend available", {
-      backendUrl: backendUrl(BACKEND_HEALTH_PATH),
-    });
-    startStandaloneBackendSync();
-    return;
-  }
-
-  startLegacyTerminalUpdateServer();
+  console.error(
+    `Standalone backend is unavailable at ${backendUrl(BACKEND_HEALTH_PATH)}. ` +
+    "Legacy terminal/slack server fallback is disabled; start http-server/ws-server and relaunch desktop.",
+  );
 }
 
 function startLegacyTerminalUpdateServer(): void {
@@ -3168,19 +3323,39 @@ function setupLegacyIpc(): void {
     return session;
   });
 
-  ipcMain.handle("session:pause", (_e, id: unknown) => {
+  ipcMain.handle("session:pause", async (_e, id: unknown) => {
     const sessionId = typeof id === "string" ? id.trim() : "";
     if (!sessionId) {
       console.error("Failed to pause session: missing session id");
       return null;
     }
-    const session = sessionManager?.pauseSession(sessionId) ?? null;
-    if (!session) {
-      console.error(`Failed to pause session: session "${sessionId}" was not found`);
+
+    try {
+      const shouldUseStandaloneBackend = backendEventsSyncEnabled || await isStandaloneBackendHealthy();
+      if (shouldUseStandaloneBackend) {
+        if (!backendEventsSyncEnabled) startStandaloneBackendSync();
+        const response = await postStandaloneBackend("/api/session/pause", { id: sessionId });
+        const session = normalizeBackendSession(response["session"]);
+        if (!session) {
+          console.error(`Failed to pause session: backend returned an invalid session for "${sessionId}"`);
+          return null;
+        }
+        applyStandaloneBackendSession(session);
+        return session;
+      }
+
+      const session = sessionManager?.pauseSession(sessionId) ?? null;
+      if (!session) {
+        console.error(`Failed to pause session: session "${sessionId}" was not found`);
+        return null;
+      }
+      debugTerminalUpdate("session paused", { id: session.id, status: session.status });
+      saveSessions(getSessionsStateToSave());
+      return session;
+    } catch (error) {
+      console.error(`Failed to pause session: ${getErrorMessage(error)}`);
       return null;
     }
-    debugTerminalUpdate("session paused", { id: session.id, status: session.status });
-    return session;
   });
 
   ipcMain.handle("session:list", () => {
@@ -3241,6 +3416,8 @@ function setupLegacyIpc(): void {
   });
 
   ipcMain.handle("slack-notification:list", () => slackNotifications.map(cloneSlackNotification));
+
+  ipcMain.handle("slack-notification:history", (_event, id: unknown) => getSlackConversationHistory(id));
 
   ipcMain.handle("slack-notification:open", (_event, id: unknown) => openSlackNotification(id));
 
@@ -3320,6 +3497,8 @@ function setupSharedIpc(): void {
     url: shellServerWebSocketUrl(),
     token: shellServerAuthToken(),
   }));
+
+  ipcMain.handle("clipboard:read-terminal-paste", () => readTerminalClipboardPaste());
 
   ipcMain.handle("shell:create-pty", async (_e, cwdArg?: unknown, nameArg?: unknown) => {
     const cwd =

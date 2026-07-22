@@ -157,6 +157,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   const httpSessions = new HttpSessionsClient();
   const latestManualTasks: ManualTaskState[] = [];
   let hasManualTasksSnapshot = false;
+  const lastInputTouchAt = new Map<string, number>();
   const multitasker = MULTITASKER_INTEGRATION_ENABLED
     ? new MultitaskerClient(MULTITASKER_BACKEND_URL)
     : null;
@@ -1102,6 +1103,14 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
         const userInputChange = analyzer.onInput(msg.sessionId, msg.data);
         if (userInputChange) {
           broadcastStatusChange(msg.sessionId, userInputChange);
+        }
+        if (multitasker && msg.data.length > 0) {
+          const now = Date.now();
+          const previousTouchAt = lastInputTouchAt.get(msg.sessionId) ?? 0;
+          if (now - previousTouchAt >= 250) {
+            lastInputTouchAt.set(msg.sessionId, now);
+            void httpSessions.touchSession(msg.sessionId);
+          }
         }
         supervisor.input(msg.sessionId, msg.data);
         return;

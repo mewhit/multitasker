@@ -34,6 +34,9 @@ export const settingsModule: HttpModule = {
             githubReview: typeof settings.githubReview === 'object' && settings.githubReview !== null
               ? settings.githubReview
               : currentSettings.githubReview,
+            installedPlugins: Array.isArray(settings.installedPlugins)
+              ? settings.installedPlugins
+              : currentSettings.installedPlugins,
           });
           startGitHubReviewScheduler();
           writeJsonResponse(response, 200, { ok: true, settings: loadSettings() });

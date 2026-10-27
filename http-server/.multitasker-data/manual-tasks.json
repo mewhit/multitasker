@@ -1,1 +1,27 @@
-[]
+[
+  {
+    "id": "manual-a6ffbed8-c9fd-4913-a2e1-2458caf5e1a8",
+    "text": "Jira HAIR-5233: Extend One-Click Add-On to Support Subscriptions for New Year Sale (https://happyhead.atlassian.net/browse/HAIR-5233)",
+    "createdAt": 1792593000226
+  },
+  {
+    "id": "manual-f655e7c6-b2f1-4ec7-a7e0-f2fe48dbeb14",
+    "text": "Jira HAIR-5219: Add address suggestions to the billing address form in LIE (https://happyhead.atlassian.net/browse/HAIR-5219)",
+    "createdAt": 1792413004654
+  },
+  {
+    "id": "manual-674d67ac-980d-40c6-8f5f-d314c4470a1b",
+    "text": "Jira HAIR-5222: Improve error messaging for edge cases of missing woo data (https://happyhead.atlassian.net/browse/HAIR-5222)",
+    "createdAt": 1792413004643
+  },
+  {
+    "id": "manual-a8961ec5-bc4e-4b49-b359-73f7cca30a71",
+    "text": "Jira HAIR-5223: Fix DateTime !== comparison in renewal reminder hasDifferentNextPaymentDate (https://happyhead.atlassian.net/browse/HAIR-5223)",
+    "createdAt": 1792413004633
+  },
+  {
+    "id": "manual-be932ae3-1479-4133-b2b3-0d77ebe2f2f5",
+    "text": "Jira HAIR-5224: Update ORDER_SIG_FIELD property on ChemRX order .pdfs for SuperCapsules (https://happyhead.atlassian.net/browse/HAIR-5224)",
+    "createdAt": 1792413004615
+  }
+]

@@ -1,1 +1,35 @@
-[]
+[
+  {
+    "id": "a6c7a116-f91c-4ba0-8540-481dc644bd7c",
+    "name": "happyhead",
+    "cmd": "",
+    "cwd": "C:\\dev\\happyhead",
+    "shellType": "powershell",
+    "clientMetadata": {
+      "kind": "vscode",
+      "workspace": "C:\\dev\\happyhead",
+      "version": "1.138.0",
+      "termProgram": "vscode"
+    }
+  },
+  {
+    "id": "be22830e-1974-4b53-9c6e-b5c18d41e02f",
+    "name": "Printer",
+    "cmd": "",
+    "cwd": "C:\\Users\\Mike",
+    "shellType": "powershell"
+  },
+  {
+    "id": "e1e57b7d-f151-41ca-80fd-ea83ad06adbf",
+    "name": "multitasker",
+    "cmd": "",
+    "cwd": "C:\\dev\\multitasker",
+    "shellType": "powershell",
+    "clientMetadata": {
+      "kind": "vscode",
+      "workspace": "C:\\dev\\multitasker",
+      "version": "1.138.0",
+      "termProgram": "vscode"
+    }
+  }
+]

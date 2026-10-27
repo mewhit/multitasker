@@ -6,6 +6,7 @@ import type { HttpModule } from '../../core/types';
 import { writeJsonResponse } from '../../core/body';
 import { getErrorMessage } from '../../core/util';
 import { isRecord, readStringField } from '../../utils/payload';
+import { loadSettings } from '../../../shared/settings';
 
 interface TextContextMessage {
   role: 'user' | 'assistant';
@@ -29,6 +30,10 @@ export const textModule: HttpModule = {
       method: 'POST',
       path: '/text',
       async handler({ payload, response }) {
+        if (!loadSettings().installedPlugins.includes('ai')) {
+          writeJsonResponse(response, 403, { ok: false, error: 'Install the AI plugin to use text suggestions.' });
+          return;
+        }
         if (!isRecord(payload)) {
           writeJsonResponse(response, 400, { ok: false, error: 'invalid_request' });
           return;

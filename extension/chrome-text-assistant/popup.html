@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Multitasker Text Assistant</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <div class="brand">
+        <span class="brand-mark">M</span>
+        <div>
+          <h1>Text Assistant</h1>
+          <p>Propulsé par Multitasker</p>
+        </div>
+      </div>
+      <div id="status" class="status loading">
+        <span class="status-dot"></span>
+        <span id="status-text">Vérification du backend…</span>
+      </div>
+      <p class="help">
+        Faites un clic droit dans un champ de texte, puis choisissez
+        <strong>Suggérer avec Multitasker</strong>.
+      </p>
+      <button id="open-docs" class="primary" type="button">Ouvrir dans Google Docs</button>
+      <p id="action-error" class="action-error" hidden></p>
+      <button id="retry" type="button">Revérifier</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

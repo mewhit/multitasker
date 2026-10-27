@@ -1,0 +1,19 @@
+{
+  "reviewTool": "code {path}",
+  "defaultShell": "powershell",
+  "googleCalendar": {
+    "calendarId": "primary",
+    "lookAheadDays": 7,
+    "enabled": false,
+    "ownedCalendarsOnly": true
+  },
+  "githubReview": {
+    "enabled": false,
+    "owner": "",
+    "repo": "",
+    "pollMinutes": 5
+  },
+  "installedPlugins": [
+    "ai"
+  ]
+}

@@ -10,6 +10,7 @@ import { legacyMarkup } from './legacyMarkup';
 import { legacyScript } from './legacyScript';
 import { NextUpList } from './components/NextUpList';
 import { SlackHistoryPanel } from './components/SlackHistoryPanel';
+import { PluginMenu } from './components/PluginMenu';
 
 declare global {
   interface Window {
@@ -22,6 +23,8 @@ declare global {
     __MULTITASKER_REACT_NEXT_UP_ROOT__?: Root;
     __MULTITASKER_SLACK_HISTORY_ROOT__?: Root;
     __MULTITASKER_SLACK_HISTORY_HOST__?: HTMLElement;
+    __MULTITASKER_PLUGIN_MENU_ROOT__?: Root;
+    __MULTITASKER_PLUGIN_MENU_HOST__?: HTMLElement;
     showSlackHistory?: (id: string) => void;
     FitAddon?: { FitAddon: typeof FitAddon };
     WebglAddon?: { WebglAddon: typeof WebglAddon };
@@ -41,6 +44,8 @@ interface TerminalNotificationSession {
 
 const TERMINAL_INPUT_SOUND_COOLDOWN_MS = 1500;
 const TERMINAL_INPUT_SOUND_DURATION_SECONDS = 0.14;
+const TERMINAL_INPUT_ATTENTION_CLASS = 'terminal-input-attention';
+const TERMINAL_INPUT_FLASH_CLASS = 'terminal-input-attention-flash';
 let lastTerminalInputSoundAt = 0;
 let terminalInputSoundWarningShown = false;
 
@@ -48,6 +53,7 @@ export function App() {
   useEffect(() => {
     const cleanupTerminalInputNotification = reinstallTerminalInputNotification();
     installSlackHistoryPanel();
+    installPluginMenu();
     if (window.__MULTITASKER_RENDERER_INITIALIZED__) {
       const cleanupPostHooks = reinstallRendererPostHooks();
       return () => {
@@ -62,6 +68,7 @@ export function App() {
 
     const runLegacyRenderer = new Function('Terminal', legacyScript);
     runLegacyRenderer(TerminalWithRightClickCopy);
+    hideLegacyGitHubReviewSettings();
     installReactNextUpList();
 
     const cleanupPostHooks = reinstallRendererPostHooks();
@@ -72,6 +79,30 @@ export function App() {
   }, []);
 
   return <div style={{ display: 'contents' }} dangerouslySetInnerHTML={{ __html: legacyMarkup }} />;
+}
+
+function hideLegacyGitHubReviewSettings(): void {
+  const legacyToggle = document.getElementById('settings-github-enabled');
+  const section = legacyToggle?.closest<HTMLElement>('.settings-section');
+  if (section) section.hidden = true;
+}
+
+function installPluginMenu(): void {
+  const header = document.getElementById('header');
+  const newSessionButton = document.getElementById('btn-new');
+  if (!header || !newSessionButton) return;
+  let host = document.getElementById('plugin-menu-root');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'plugin-menu-root';
+    header.insertBefore(host, newSessionButton);
+  }
+  if (window.__MULTITASKER_PLUGIN_MENU_HOST__ !== host) {
+    window.__MULTITASKER_PLUGIN_MENU_ROOT__?.unmount();
+    window.__MULTITASKER_PLUGIN_MENU_ROOT__ = createRoot(host);
+    window.__MULTITASKER_PLUGIN_MENU_HOST__ = host;
+  }
+  window.__MULTITASKER_PLUGIN_MENU_ROOT__.render(<PluginMenu />);
 }
 
 function installSlackHistoryPanel(): void {
@@ -104,7 +135,19 @@ function installTerminalInputNotification(): () => void {
   let active = true;
   let sessionsInitialized = false;
   let domInitialized = false;
+  let attentionActive = false;
   let scanFrame = 0;
+
+  const syncAttentionState = (): void => {
+    const needsInput = sessionsInitialized
+      ? [...sessionStatuses.values()].some((status) => status === 'needs_attention')
+      : [...domNeedsInput.values()].some(Boolean);
+    if (needsInput === attentionActive) return;
+    attentionActive = needsInput;
+    document.documentElement.classList.toggle(TERMINAL_INPUT_ATTENTION_CLASS, needsInput);
+    window.electronAPI.setWindowInputAttention?.(needsInput);
+    if (!needsInput) document.documentElement.classList.remove(TERMINAL_INPUT_FLASH_CLASS);
+  };
 
   const applySessions = (value: unknown): void => {
     if (!Array.isArray(value)) return;
@@ -133,7 +176,8 @@ function installTerminalInputNotification(): () => void {
       if (!seen.has(id)) sessionStatuses.delete(id);
     }
     sessionsInitialized = true;
-    if (shouldPlay) playTerminalInputNeededSound();
+    syncAttentionState();
+    if (shouldPlay) signalTerminalInputNeeded();
   };
 
   const scanDom = (): void => {
@@ -163,7 +207,8 @@ function installTerminalInputNotification(): () => void {
       if (!seen.has(key)) domNeedsInput.delete(key);
     }
     domInitialized = true;
-    if (shouldPlay) playTerminalInputNeededSound();
+    syncAttentionState();
+    if (shouldPlay) signalTerminalInputNeeded();
   };
 
   const queueDomScan = (): void => {
@@ -197,6 +242,8 @@ function installTerminalInputNotification(): () => void {
     active = false;
     observer.disconnect();
     if (scanFrame) window.cancelAnimationFrame(scanFrame);
+    document.documentElement.classList.remove(TERMINAL_INPUT_ATTENTION_CLASS, TERMINAL_INPUT_FLASH_CLASS);
+    window.electronAPI.setWindowInputAttention?.(false);
     if (window.__MULTITASKER_TERMINAL_INPUT_SOUND_CLEANUP__ === cleanup) {
       delete window.__MULTITASKER_TERMINAL_INPUT_SOUND_CLEANUP__;
     }
@@ -216,6 +263,15 @@ function normalizeNotificationStatus(status: string | undefined): string {
 
 function isNeedsInputBadge(badge: HTMLElement): boolean {
   return badge.classList.contains('needs_attention') || badge.textContent?.trim().toLowerCase() === 'needs input';
+}
+
+function signalTerminalInputNeeded(): void {
+  const root = document.documentElement;
+  root.classList.remove(TERMINAL_INPUT_FLASH_CLASS);
+  void root.offsetWidth;
+  root.classList.add(TERMINAL_INPUT_FLASH_CLASS);
+  window.electronAPI.requestWindowAttention?.();
+  playTerminalInputNeededSound();
 }
 
 function playTerminalInputNeededSound(): void {

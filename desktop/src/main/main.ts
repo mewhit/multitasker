@@ -105,6 +105,7 @@ const GOOGLE_CALENDAR_TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
 const MAX_GOOGLE_CALENDAR_EVENTS = 100;
 const SLACK_OAUTH_SCRIPT_RELATIVE_PATH = path.join("extension", "slack", "src", "slack-oauth.js");
 const SLACK_ENV_RELATIVE_PATH = path.join("extension", "slack", ".env");
+const SLACK_WORKSPACES_RELATIVE_PATH = path.join("extension", "slack", "workspaces.json");
 const CLIPBOARD_IMAGE_DIRECTORY_NAME = "clipboard-images";
 
 interface GoogleCalendarStatus {
@@ -147,6 +148,74 @@ interface GoogleCalendarAuthResult {
 interface SlackAuthStatus {
   ok: boolean;
   message: string;
+}
+
+interface JiraSiteStatus {
+  cloudId: string;
+  name: string;
+  url: string;
+}
+
+interface JiraStatus {
+  configured: boolean;
+  connected: boolean;
+  site: JiraSiteStatus | null;
+  preferredSiteUrl: string;
+  jql: string;
+  pollMinutes: number;
+  trackedIssueCount: number;
+  lastPolledAt?: number;
+  lastError?: string;
+}
+
+interface JiraActionResult {
+  ok: boolean;
+  message: string;
+  status: JiraStatus;
+}
+
+interface GitHubAccountStatus {
+  login: string;
+  avatarUrl: string;
+  profileUrl: string;
+}
+
+interface GitHubStatus {
+  configured: boolean;
+  oauthConfigured: boolean;
+  connected: boolean;
+  authMode: "oauth" | "token" | null;
+  account: GitHubAccountStatus | null;
+  pollMinutes: number;
+  trackedReviewRequestCount: number;
+  lastPolledAt?: number;
+  lastError?: string;
+}
+
+interface GitHubActionResult {
+  ok: boolean;
+  message: string;
+  status: GitHubStatus;
+}
+
+interface SlackWorkspaceConnection {
+  teamId: string;
+  teamName: string;
+  userId: string;
+  userToken: string;
+  botToken: string;
+  botScopes: string[];
+  userScopes: string[];
+  connectedAt: number;
+}
+
+interface SlackWorkspaceSummary {
+  teamId: string;
+  teamName: string;
+  userId: string;
+  botScopes: string[];
+  userScopes: string[];
+  connectedAt: number;
 }
 
 interface SlackHistoryMessage {
@@ -229,6 +298,7 @@ let backendTaskSocketConnecting = false;
 let backendTaskSocketAuthDisabled = false;
 let backendTaskSocketLastWarning = "";
 let slackAuthProcess: ReturnType<typeof spawn> | null = null;
+let slackAuthUrl = "";
 let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let standaloneBackendNextUp: NextUpItem[] | null = null;
 const pendingTerminalUpdates = new Map<string, TerminalUpdate>();
@@ -409,7 +479,9 @@ function resolveProjectPath(relativePath: string): string {
     path.join(app.getAppPath(), relativePath),
     path.resolve(__dirname, "..", "..", "..", relativePath),
   ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
+  return candidates.find((candidate) => fs.existsSync(candidate))
+    ?? candidates.find((candidate) => fs.existsSync(path.dirname(candidate)))
+    ?? candidates[0];
 }
 
 function delay(ms: number): Promise<void> {
@@ -1603,12 +1675,13 @@ function parseSlackEvent(payload: unknown): SlackEventParseResult {
 
   const event = isRecord(eventPayload["event"]) ? eventPayload["event"] : undefined;
   if (!event) return { kind: "skipped", reason: "missing_event" };
-  if (!shouldCreateSlackNotificationForEvent(event)) return { kind: "skipped", reason: "not_actionable" };
+  const teamId = readStringField(eventPayload, "team_id").trim() || readStringField(payload, "team_id").trim();
+  if (!isSlackWorkspaceConnected(teamId)) return { kind: "skipped", reason: "workspace_not_connected" };
+  if (!shouldCreateSlackNotificationForEvent(event, teamId)) return { kind: "skipped", reason: "not_actionable" };
 
   const text = normalizeSlackText(readStringField(event, "text"));
   if (!text) return { kind: "skipped", reason: "missing_text" };
 
-  const teamId = readStringField(eventPayload, "team_id").trim() || readStringField(payload, "team_id").trim();
   const channelId = readStringField(event, "channel").trim();
   const channelType = readStringField(event, "channel_type").trim();
   const userId = readStringField(event, "user").trim() || readStringField(event, "bot_id").trim();
@@ -1629,14 +1702,14 @@ function parseSlackEvent(payload: unknown): SlackEventParseResult {
   if (ts) notification.ts = ts;
   if (threadTs) notification.threadTs = threadTs;
   if (permalink) notification.permalink = permalink;
-  const priority = slackNotificationPriority(event, channelType);
+  const priority = slackNotificationPriority(event, channelType, teamId);
   notification.priorityRank = priority.rank;
   notification.priorityLabel = priority.label;
   return { kind: "notification", notification };
 }
 
-function shouldCreateSlackNotificationForEvent(event: Record<string, unknown>): boolean {
-  const slackUserId = readSlackConfigValue("SLACK_USER_ID");
+function shouldCreateSlackNotificationForEvent(event: Record<string, unknown>, teamId?: string): boolean {
+  const slackUserId = findSlackWorkspace(teamId)?.userId || readSlackConfigValue("SLACK_USER_ID");
   if (isSlackEventSentByAuthedUser(event, slackUserId)) return false;
 
   const eventType = readStringField(event, "type").trim();
@@ -1682,9 +1755,10 @@ function getSlackNotificationId(identity: {
 function slackNotificationPriority(
   event: Record<string, unknown>,
   channelType: string,
+  teamId?: string,
 ): { rank: number; label: NonNullable<SlackNotificationState["priorityLabel"]> } {
   if (channelType === "im" || channelType === "mpim") return { rank: 0, label: "dm" };
-  const slackUserId = readSlackConfigValue("SLACK_USER_ID");
+  const slackUserId = findSlackWorkspace(teamId)?.userId || readSlackConfigValue("SLACK_USER_ID");
   const text = readStringField(event, "text");
   if (slackUserId && text.includes(`<@${slackUserId}>`)) return { rank: 1, label: "mention" };
   if (readStringField(event, "type").trim() === "app_mention") return { rank: 1, label: "mention" };
@@ -2703,6 +2777,162 @@ async function openSlackNotification(id: unknown): Promise<boolean> {
   }
 }
 
+async function getStandaloneBackend(pathname: string): Promise<Record<string, unknown>> {
+  const response = await fetch(backendUrl(pathname));
+  const payload = await readStandaloneBackendJsonResponse(response);
+  if (!response.ok || payload["ok"] !== true) {
+    const error = readStringField(payload, "error").trim() || `HTTP ${response.status}`;
+    throw new Error(error);
+  }
+  return payload;
+}
+
+async function getJiraStatus(): Promise<JiraStatus> {
+  return normalizeJiraStatus(await getStandaloneBackend("/api/jira/status"));
+}
+
+async function startJiraAuth(): Promise<JiraActionResult> {
+  const status = await getJiraStatus();
+  if (!status.configured) {
+    return {
+      ok: false,
+      message: "Jira OAuth is not configured. Add the Atlassian client ID and secret to the HTTP server environment.",
+      status,
+    };
+  }
+
+  await shell.openExternal(backendUrl("/api/jira/oauth/start"));
+  return {
+    ok: true,
+    message: "Jira authorization opened in your browser. Complete the Atlassian consent screen, then return here.",
+    status,
+  };
+}
+
+async function disconnectJira(): Promise<JiraActionResult> {
+  await postStandaloneBackend("/api/jira/disconnect", {});
+  return {
+    ok: true,
+    message: "Jira disconnected.",
+    status: await getJiraStatus(),
+  };
+}
+
+async function pollJiraNow(): Promise<JiraActionResult> {
+  const result = await postStandaloneBackend("/api/jira/poll", {});
+  const newIssueCount = readOptionalNumberField(result, "newIssueCount") ?? 0;
+  return {
+    ok: true,
+    message: newIssueCount === 1
+      ? "Jira refreshed and 1 new ticket was added to next-up."
+      : `Jira refreshed and ${newIssueCount} new tickets were added to next-up.`,
+    status: await getJiraStatus(),
+  };
+}
+
+function normalizeJiraStatus(payload: Record<string, unknown>): JiraStatus {
+  const siteValue = payload["site"];
+  const site = isRecord(siteValue) ? normalizeJiraSiteStatus(siteValue) : null;
+  const status: JiraStatus = {
+    configured: payload["configured"] === true,
+    connected: payload["connected"] === true,
+    site,
+    preferredSiteUrl: readStringField(payload, "preferredSiteUrl").trim(),
+    jql: readStringField(payload, "jql").trim(),
+    pollMinutes: readOptionalNumberField(payload, "pollMinutes") ?? 30,
+    trackedIssueCount: readOptionalNumberField(payload, "trackedIssueCount") ?? 0,
+  };
+  const lastPolledAt = readOptionalNumberField(payload, "lastPolledAt");
+  if (lastPolledAt !== undefined) status.lastPolledAt = lastPolledAt;
+  const lastError = readStringField(payload, "lastError").trim();
+  if (lastError) status.lastError = lastError;
+  return status;
+}
+
+function normalizeJiraSiteStatus(value: Record<string, unknown>): JiraSiteStatus | null {
+  const cloudId = readStringField(value, "cloudId").trim();
+  const name = readStringField(value, "name").trim();
+  const url = readStringField(value, "url").trim();
+  return cloudId && url ? { cloudId, name, url } : null;
+}
+
+async function getGitHubStatus(): Promise<GitHubStatus> {
+  return normalizeGitHubStatus(await getStandaloneBackend("/api/github/status"));
+}
+
+async function startGitHubAuth(): Promise<GitHubActionResult> {
+  const status = await getGitHubStatus();
+  if (!status.oauthConfigured) {
+    return {
+      ok: false,
+      message: status.authMode === "token"
+        ? "GitHub is using MULTITASKER_GITHUB_TOKEN. Configure OAuth credentials to reconnect with another account."
+        : "GitHub OAuth is not configured. Add the GitHub client ID and secret to the HTTP server environment.",
+      status,
+    };
+  }
+  await shell.openExternal(backendUrl("/api/github/oauth/start"));
+  return {
+    ok: true,
+    message: "GitHub authorization opened in your browser. Complete the consent screen, then return here.",
+    status,
+  };
+}
+
+async function disconnectGitHub(): Promise<GitHubActionResult> {
+  await postStandaloneBackend("/api/github/disconnect", {});
+  const status = await getGitHubStatus();
+  return {
+    ok: true,
+    message: status.authMode === "token"
+      ? "The OAuth account was disconnected; the environment token is still active."
+      : "GitHub disconnected.",
+    status,
+  };
+}
+
+async function pollGitHubNow(): Promise<GitHubActionResult> {
+  const result = await postStandaloneBackend("/api/github/poll", {});
+  const newReviewRequestCount = readOptionalNumberField(result, "newReviewRequestCount") ?? 0;
+  return {
+    ok: true,
+    message: newReviewRequestCount === 1
+      ? "GitHub refreshed and 1 review request was added to next-up."
+      : `GitHub refreshed and ${newReviewRequestCount} review requests were added to next-up.`,
+    status: await getGitHubStatus(),
+  };
+}
+
+function normalizeGitHubStatus(payload: Record<string, unknown>): GitHubStatus {
+  const accountValue = payload["account"];
+  const account = isRecord(accountValue) ? normalizeGitHubAccountStatus(accountValue) : null;
+  const authModeValue = readStringField(payload, "authMode").trim();
+  const status: GitHubStatus = {
+    configured: payload["configured"] === true,
+    oauthConfigured: payload["oauthConfigured"] === true,
+    connected: payload["connected"] === true,
+    authMode: authModeValue === "oauth" || authModeValue === "token" ? authModeValue : null,
+    account,
+    pollMinutes: readOptionalNumberField(payload, "pollMinutes") ?? 5,
+    trackedReviewRequestCount: readOptionalNumberField(payload, "trackedReviewRequestCount") ?? 0,
+  };
+  const lastPolledAt = readOptionalNumberField(payload, "lastPolledAt");
+  if (lastPolledAt !== undefined) status.lastPolledAt = lastPolledAt;
+  const lastError = readStringField(payload, "lastError").trim();
+  if (lastError) status.lastError = lastError;
+  return status;
+}
+
+function normalizeGitHubAccountStatus(value: Record<string, unknown>): GitHubAccountStatus | null {
+  const login = readStringField(value, "login").trim();
+  if (!login) return null;
+  return {
+    login,
+    avatarUrl: readStringField(value, "avatarUrl").trim(),
+    profileUrl: readStringField(value, "profileUrl").trim(),
+  };
+}
+
 async function getSlackConversationHistory(id: unknown): Promise<SlackConversationHistory> {
   if (typeof id !== "string" || !id.trim()) throw new Error("Missing Slack notification id.");
   const notification = slackNotifications.find((candidate) => candidate.id === id.trim());
@@ -2721,12 +2951,12 @@ async function getSlackConversationHistory(id: unknown): Promise<SlackConversati
     query.inclusive = "true";
   }
 
-  const response = await callSlackHistoryApi(method, query);
+  const response = await callSlackHistoryApi(method, query, notification.teamId);
   const rawMessages = Array.isArray(response["messages"])
     ? response["messages"].filter(isRecord)
     : [];
   const userIds = [...new Set(rawMessages.map((message) => readStringField(message, "user").trim()).filter(Boolean))];
-  const userNames = new Map(await Promise.all(userIds.map(async (userId) => [userId, await resolveSlackHistoryUserName(userId)] as const)));
+  const userNames = new Map(await Promise.all(userIds.map(async (userId) => [userId, await resolveSlackHistoryUserName(userId, notification.teamId)] as const)));
   const selectedTs = notification.ts?.trim() ?? "";
   const messages = rawMessages
     .map((message): SlackHistoryMessage | null => {
@@ -2756,27 +2986,75 @@ async function getSlackConversationHistory(id: unknown): Promise<SlackConversati
   return { notificationId: notification.id, title, kind: threadTs ? "thread" : "channel", messages };
 }
 
+async function sendSlackMessage(id: unknown, text: unknown): Promise<SlackHistoryMessage> {
+  if (typeof id !== "string" || !id.trim()) throw new Error("Missing Slack notification id.");
+  if (typeof text !== "string" || !text.trim()) throw new Error("Enter a message to send.");
+  const messageText = text.trim();
+  if (messageText.length > 40_000) throw new Error("Slack messages cannot exceed 40,000 characters.");
+
+  const notification = slackNotifications.find((candidate) => candidate.id === id.trim());
+  if (!notification) throw new Error("This Slack task is no longer available.");
+  const channelId = notification.channelId?.trim() ?? "";
+  if (!channelId) throw new Error("This Slack task does not include a channel id.");
+
+  const workspace = findSlackWorkspace(notification.teamId);
+  const token = workspace?.userToken || workspace?.botToken || readSlackConfigValue("SLACK_USER_TOKEN") || readSlackConfigValue("SLACK_BOT_TOKEN");
+  if (!token) throw new Error("Slack is not authorized. Connect Slack from the add menu first.");
+
+  const body: Record<string, string> = { channel: channelId, text: messageText };
+  const threadTs = notification.threadTs?.trim() ?? "";
+  if (threadTs) body.thread_ts = threadTs;
+  const response = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(body),
+  });
+  const payload: unknown = await response.json();
+  if (!response.ok || !isRecord(payload) || payload["ok"] !== true) {
+    const error = isRecord(payload) ? readStringField(payload, "error").trim() : "";
+    throw new Error(`Slack message could not be sent${error ? `: ${error}` : "."}`);
+  }
+
+  const message = isRecord(payload["message"]) ? payload["message"] : undefined;
+  const ts = (message && readStringField(message, "ts").trim()) || readStringField(payload, "ts").trim();
+  const userId = (message && readStringField(message, "user").trim()) || workspace?.userId || "";
+  const result: SlackHistoryMessage = {
+    ts,
+    text: messageText,
+    userName: "You",
+    sentAt: parseSlackTimestampMs(ts) ?? Date.now(),
+    selected: false,
+  };
+  if (userId) result.userId = userId;
+  return result;
+}
+
 const slackHistoryUserNameCache = new Map<string, string>();
 
-async function resolveSlackHistoryUserName(userId: string): Promise<string> {
-  const cached = slackHistoryUserNameCache.get(userId);
+async function resolveSlackHistoryUserName(userId: string, teamId?: string): Promise<string> {
+  const cacheKey = `${teamId ?? ""}:${userId}`;
+  const cached = slackHistoryUserNameCache.get(cacheKey);
   if (cached) return cached;
   try {
-    const response = await callSlackHistoryApi("users.info", { user: userId });
+    const response = await callSlackHistoryApi("users.info", { user: userId }, teamId);
     const user = isRecord(response["user"]) ? response["user"] : undefined;
     const profile = user && isRecord(user["profile"]) ? user["profile"] : undefined;
     const name = (profile && (readStringField(profile, "display_name").trim() || readStringField(profile, "real_name").trim()))
       || (user && readStringField(user, "name").trim())
       || userId;
-    slackHistoryUserNameCache.set(userId, name);
+    slackHistoryUserNameCache.set(cacheKey, name);
     return name;
   } catch {
     return userId;
   }
 }
 
-async function callSlackHistoryApi(method: string, query: Record<string, string>): Promise<Record<string, unknown>> {
-  const token = readSlackConfigValue("SLACK_USER_TOKEN") || readSlackConfigValue("SLACK_BOT_TOKEN");
+async function callSlackHistoryApi(method: string, query: Record<string, string>, teamId?: string): Promise<Record<string, unknown>> {
+  const workspace = findSlackWorkspace(teamId);
+  const token = workspace?.userToken || workspace?.botToken || readSlackConfigValue("SLACK_USER_TOKEN") || readSlackConfigValue("SLACK_BOT_TOKEN");
   if (!token) throw new Error("Slack is not authorized. Connect Slack from the add menu first.");
   const url = new URL(`https://slack.com/api/${method}`);
   for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
@@ -2845,7 +3123,13 @@ function isSlackPermalink(value: string): boolean {
 
 function startSlackAuth(): SlackAuthStatus {
   if (slackAuthProcess) {
-    return { ok: true, message: "Slack authorization is already running." };
+    if (slackAuthUrl) openSlackAuthorizationUrl(slackAuthUrl);
+    return {
+      ok: true,
+      message: slackAuthUrl
+        ? "Slack authorization is already running. The authorization page was reopened in your default browser."
+        : "Slack authorization is already starting. The authorization page will open in your default browser.",
+    };
   }
 
   const oauthScriptPath = resolveProjectPath(SLACK_OAUTH_SCRIPT_RELATIVE_PATH);
@@ -2870,10 +3154,12 @@ function startSlackAuth(): SlackAuthStatus {
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
+      SLACK_OAUTH_OPEN_BROWSER: "0",
     },
     windowsHide: true,
   });
   slackAuthProcess = child;
+  slackAuthUrl = "";
 
   let stdout = "";
   let stderr = "";
@@ -2881,16 +3167,23 @@ function startSlackAuth(): SlackAuthStatus {
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     stdout = appendSlackAuthOutput(stdout, chunk);
+    const authorizeUrl = findSlackAuthorizationUrl(stdout);
+    if (authorizeUrl && authorizeUrl !== slackAuthUrl) {
+      slackAuthUrl = authorizeUrl;
+      openSlackAuthorizationUrl(authorizeUrl);
+    }
   });
   child.stderr.on("data", (chunk: string) => {
     stderr = appendSlackAuthOutput(stderr, chunk);
   });
   child.once("error", (error) => {
     if (slackAuthProcess === child) slackAuthProcess = null;
+    slackAuthUrl = "";
     notifySlackAuthStatus({ ok: false, message: `Could not start Slack authorization: ${getErrorMessage(error)}` });
   });
   child.once("exit", (code, signal) => {
     if (slackAuthProcess === child) slackAuthProcess = null;
+    slackAuthUrl = "";
     if (code === 0) {
       notifySlackAuthStatus({ ok: true, message: "Slack authorization completed." });
       return;
@@ -2917,6 +3210,108 @@ function readSlackConfigValue(key: string): string {
   const envPath = resolveProjectPath(SLACK_ENV_RELATIVE_PATH);
   if (!fs.existsSync(envPath)) return "";
   return parseEnvContent(fs.readFileSync(envPath, "utf8"))[key]?.trim() ?? "";
+}
+
+function findSlackAuthorizationUrl(output: string): string {
+  const matches = output.match(/https:\/\/slack\.com\/oauth\/v2\/authorize\?[^\s]+/g);
+  return matches?.at(-1) ?? "";
+}
+
+function openSlackAuthorizationUrl(url: string): void {
+  void shell.openExternal(url).catch((error) => {
+    notifySlackAuthStatus({
+      ok: false,
+      message: `Could not open the Slack authorization page: ${getErrorMessage(error)}`,
+    });
+  });
+}
+
+function loadSlackWorkspaces(): SlackWorkspaceConnection[] {
+  const filePath = resolveProjectPath(SLACK_WORKSPACES_RELATIVE_PATH);
+  if (fs.existsSync(filePath)) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (Array.isArray(parsed)) {
+        return parsed.map(normalizeSlackWorkspace).filter((value): value is SlackWorkspaceConnection => value !== null);
+      }
+    } catch (error) {
+      console.error(`Failed to read Slack workspaces: ${getErrorMessage(error)}`);
+    }
+  }
+
+  const teamId = readSlackConfigValue("SLACK_TEAM_ID");
+  const userToken = readSlackConfigValue("SLACK_USER_TOKEN");
+  const botToken = readSlackConfigValue("SLACK_BOT_TOKEN");
+  if (!teamId || (!userToken && !botToken)) return [];
+  return [{
+    teamId,
+    teamName: readSlackConfigValue("SLACK_TEAM_NAME") || teamId,
+    userId: readSlackConfigValue("SLACK_USER_ID"),
+    userToken,
+    botToken,
+    botScopes: parseSlackScopes(readSlackConfigValue("SLACK_BOT_SCOPES")),
+    userScopes: parseSlackScopes(readSlackConfigValue("SLACK_USER_SCOPES")),
+    connectedAt: 0,
+  }];
+}
+
+function normalizeSlackWorkspace(value: unknown): SlackWorkspaceConnection | null {
+  if (!isRecord(value)) return null;
+  const teamId = readStringField(value, "teamId").trim();
+  const userToken = readStringField(value, "userToken").trim();
+  const botToken = readStringField(value, "botToken").trim();
+  if (!teamId || (!userToken && !botToken)) return null;
+  return {
+    teamId,
+    teamName: readStringField(value, "teamName").trim() || teamId,
+    userId: readStringField(value, "userId").trim(),
+    userToken,
+    botToken,
+    botScopes: readStringArray(value["botScopes"]),
+    userScopes: readStringArray(value["userScopes"]),
+    connectedAt: typeof value["connectedAt"] === "number" ? value["connectedAt"] : 0,
+  };
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()) : [];
+}
+
+function parseSlackScopes(value: string): string[] {
+  return value.split(",").map((scope) => scope.trim()).filter(Boolean);
+}
+
+function findSlackWorkspace(teamId?: string): SlackWorkspaceConnection | undefined {
+  const workspaces = loadSlackWorkspaces();
+  return teamId ? workspaces.find((workspace) => workspace.teamId === teamId) : workspaces[0];
+}
+
+function isSlackWorkspaceConnected(teamId: string): boolean {
+  const registryPath = resolveProjectPath(SLACK_WORKSPACES_RELATIVE_PATH);
+  if (!fs.existsSync(registryPath)) return true;
+  return Boolean(teamId && findSlackWorkspace(teamId));
+}
+
+function getSlackWorkspaceSummaries(): SlackWorkspaceSummary[] {
+  return loadSlackWorkspaces().map(({ teamId, teamName, userId, botScopes, userScopes, connectedAt }) => ({
+    teamId,
+    teamName,
+    userId,
+    botScopes,
+    userScopes,
+    connectedAt,
+  }));
+}
+
+function removeSlackWorkspace(teamId: unknown): boolean {
+  if (typeof teamId !== "string" || !teamId.trim()) return false;
+  const normalizedTeamId = teamId.trim();
+  const workspaces = loadSlackWorkspaces();
+  const next = workspaces.filter((workspace) => workspace.teamId !== normalizedTeamId);
+  if (next.length === workspaces.length) return false;
+  const filePath = resolveProjectPath(SLACK_WORKSPACES_RELATIVE_PATH);
+  fs.writeFileSync(filePath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return true;
 }
 
 function parseEnvContent(content: string): Record<string, string> {
@@ -3262,6 +3657,18 @@ function writeJsonResponse(response: ServerResponse, statusCode: number, body: u
 }
 
 function setupLegacyIpc(): void {
+  ipcMain.on("window:set-input-attention", (event, active: unknown) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window !== mainWindow || window.isDestroyed()) return;
+    if (active !== true) window.flashFrame(false);
+  });
+
+  ipcMain.on("window:request-attention", (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window !== mainWindow || window.isDestroyed() || window.isFocused()) return;
+    window.flashFrame(true);
+  });
+
   ipcMain.handle("session:create", (_e, name: string, cmd: string, cwd: string, shellType: string, sshCommand = "") => {
     const settings = loadSettings();
     const normalizedShellType = isShellType(shellType) ? shellType : settings.defaultShell;
@@ -3301,7 +3708,7 @@ function setupLegacyIpc(): void {
     }
   });
 
-  ipcMain.handle("session:rename", (_e, id: unknown, name: unknown) => {
+  ipcMain.handle("session:rename", async (_e, id: unknown, name: unknown) => {
     const sessionId = typeof id === "string" ? id.trim() : "";
     const nextName = typeof name === "string" ? name.trim() : "";
     if (!sessionId || !nextName) {
@@ -3309,18 +3716,36 @@ function setupLegacyIpc(): void {
       return null;
     }
 
-    const session = sessionManager?.renameSession(sessionId, nextName) ?? null;
-    if (!session) {
-      console.error(`Failed to rename session: session "${sessionId}" was not found`);
+    try {
+      const shouldUseStandaloneBackend = backendEventsSyncEnabled || await isStandaloneBackendHealthy();
+      if (shouldUseStandaloneBackend) {
+        if (!backendEventsSyncEnabled) startStandaloneBackendSync();
+        const response = await postStandaloneBackend("/api/session/rename", { id: sessionId, name: nextName });
+        const session = normalizeBackendSession(response["session"]);
+        if (!session) {
+          console.error(`Failed to rename session: backend returned an invalid session for "${sessionId}"`);
+          return null;
+        }
+        applyStandaloneBackendSession(session);
+        return session;
+      }
+
+      const session = sessionManager?.renameSession(sessionId, nextName) ?? null;
+      if (!session) {
+        console.error(`Failed to rename session: session "${sessionId}" was not found`);
+        return null;
+      }
+
+      debugTerminalUpdate("session renamed", {
+        id: session.id,
+        sessionName: session.name,
+      });
+      saveSessions(getSessionsStateToSave());
+      return session;
+    } catch (error) {
+      console.error(`Failed to rename session: ${getErrorMessage(error)}`);
       return null;
     }
-
-    debugTerminalUpdate("session renamed", {
-      id: session.id,
-      sessionName: session.name,
-    });
-    saveSessions(getSessionsStateToSave());
-    return session;
   });
 
   ipcMain.handle("session:pause", async (_e, id: unknown) => {
@@ -3386,8 +3811,37 @@ function setupLegacyIpc(): void {
   ipcMain.handle("settings:get", () => loadSettings());
 
   ipcMain.handle("settings:set", (_e, settings: AppSettings) => {
-    saveSettings(settings);
+    const currentSettings = loadSettings();
+    saveSettings({
+      ...settings,
+      installedPlugins: Array.isArray(settings.installedPlugins)
+        ? settings.installedPlugins
+        : currentSettings.installedPlugins,
+    });
     handleGoogleCalendarSettingsChanged();
+  });
+
+  ipcMain.handle("plugin:list", async () => {
+    const payload = await getStandaloneBackend("/api/settings");
+    const settings = isRecord(payload["settings"]) ? payload["settings"] : {};
+    const installedPlugins = settings["installedPlugins"];
+    return Array.isArray(installedPlugins)
+      ? installedPlugins.filter((plugin): plugin is string => typeof plugin === "string")
+      : [];
+  });
+
+  ipcMain.handle("plugin:set-installed", async (_e, pluginId: unknown, installed: unknown) => {
+    if (pluginId !== "ai" || typeof installed !== "boolean") throw new Error("Unknown plugin.");
+    const payload = await getStandaloneBackend("/api/settings");
+    const settings = isRecord(payload["settings"]) ? payload["settings"] : {};
+    const current = Array.isArray(settings["installedPlugins"])
+      ? settings["installedPlugins"].filter((plugin): plugin is string => typeof plugin === "string")
+      : [];
+    const installedPlugins = installed
+      ? [...new Set([...current, pluginId])]
+      : current.filter((candidate) => candidate !== pluginId);
+    await postStandaloneBackend("/api/settings", { installedPlugins });
+    return installedPlugins;
   });
 
   ipcMain.handle("manual-task:list", () => manualTasks.map((task) => ({ ...task })));
@@ -3418,6 +3872,8 @@ function setupLegacyIpc(): void {
   ipcMain.handle("slack-notification:list", () => slackNotifications.map(cloneSlackNotification));
 
   ipcMain.handle("slack-notification:history", (_event, id: unknown) => getSlackConversationHistory(id));
+
+  ipcMain.handle("slack-notification:send", (_event, id: unknown, text: unknown) => sendSlackMessage(id, text));
 
   ipcMain.handle("slack-notification:open", (_event, id: unknown) => openSlackNotification(id));
 
@@ -3486,10 +3942,57 @@ function setupIpc(): void {
   setupSharedIpc();
   setupGoogleCalendarIpc();
   setupSlackIpc();
+  setupJiraIpc();
+  setupGitHubIpc();
 }
 
 function setupSlackIpc(): void {
   ipcMain.handle("slack:auth:start", () => startSlackAuth());
+  ipcMain.handle("slack:workspace:list", () => getSlackWorkspaceSummaries());
+  ipcMain.handle("slack:workspace:remove", (_event, teamId: unknown) => removeSlackWorkspace(teamId));
+}
+
+function setupJiraIpc(): void {
+  ipcMain.handle("jira:status", () => getJiraStatus());
+  ipcMain.handle("jira:connect", () => startJiraAuth());
+  ipcMain.handle("jira:disconnect", () => disconnectJira());
+  ipcMain.handle("jira:poll", () => pollJiraNow());
+}
+
+function setupGitHubIpc(): void {
+  ipcMain.handle("github:status", () => getGitHubStatus());
+  ipcMain.handle("github:connect", () => startGitHubAuth());
+  ipcMain.handle("github:disconnect", () => disconnectGitHub());
+  ipcMain.handle("github:poll", () => pollGitHubNow());
+}
+
+async function registerAppShellSession(
+  name: string,
+  cwd: string,
+  shellType: Session["shellType"],
+  sessionId: string,
+  sshCommand = "",
+  sshOptions?: Session["sshOptions"],
+): Promise<Session | null> {
+  const shouldUseStandaloneBackend = backendEventsSyncEnabled || await isStandaloneBackendHealthy();
+  if (shouldUseStandaloneBackend) {
+    if (!backendEventsSyncEnabled) startStandaloneBackendSync();
+    const response = await postStandaloneBackend("/api/session/create", {
+      name, cmd: "", cwd, shellType,
+      requestedId: sessionId,
+      shellSessionId: sessionId,
+      sshCommand,
+      ...(sshOptions ? { sshOptions } : {}),
+    });
+    const session = normalizeBackendSession(response["session"]);
+    if (!session) throw new Error("Backend did not register the shell session");
+    applyStandaloneBackendSession(session);
+    return session;
+  }
+
+  const session = sessionManager?.createSession(name, "", cwd, shellType, sessionId, sshCommand, "", undefined, sshOptions) ?? null;
+  if (session) saveSessions(getSessionsStateToSave());
+  return session;
 }
 
 function setupSharedIpc(): void {
@@ -3509,14 +4012,13 @@ function setupSharedIpc(): void {
       const pty = await spawnShellPty({ cwd, track: false });
       const shortId = pty.sessionId.slice(0, 8);
       const name = typeof nameArg === "string" && nameArg.trim() ? nameArg.trim() : `shell ${shortId}`;
-      const session = sessionManager?.createSession(name, "", pty.cwd, localShell, pty.sessionId) ?? null;
+      const session = await registerAppShellSession(name, pty.cwd, localShell, pty.sessionId);
       if (session) {
         debugTerminalUpdate("shell pty created from app", {
           id: session.id,
           pid: pty.pid,
           shell: pty.shell,
         });
-        saveSessions(getSessionsStateToSave());
       }
       return session;
     } catch (error) {
@@ -3579,24 +4081,20 @@ function setupSharedIpc(): void {
       if (sshOpts.agent) sessionSshOptions.agent = sshOpts.agent;
       if (sshOpts.initCommand) sessionSshOptions.initCommand = sshOpts.initCommand;
       const session =
-        sessionManager?.createSession(
+        await registerAppShellSession(
           baseName,
-          "",
           ssh.cwd || "",
           "ssh",
           ssh.sessionId,
           `${username}@${host}${port !== 22 ? ":" + port : ""}`,
-          "",
-          undefined,
           sessionSshOptions,
-        ) ?? null;
+        );
       if (session) {
         debugTerminalUpdate("shell ssh created from app", {
           id: session.id,
           host,
           username,
         });
-        saveSessions(getSessionsStateToSave());
       }
       return session;
     } catch (error) {
@@ -3926,10 +4424,11 @@ function createWindow(): void {
   startRecurringTaskScheduler();
   restorePersistedGoogleCalendarEvents();
   startGoogleCalendarScheduler();
-  if (process.env["NODE_ENV"] === "development") {
-    void mainWindow.loadURL("http://localhost:5173");
+  const rendererUrl = process.env["ELECTRON_RENDERER_URL"];
+  if (rendererUrl) {
+    void mainWindow.loadURL(rendererUrl);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
+    void mainWindow.loadFile(path.join(__dirname, "..", "..", "renderer", "index.html"));
   }
 }
 

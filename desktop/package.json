@@ -6,7 +6,7 @@
   "main": "../dist/desktop/src/main.js",
   "scripts": {
     "build": "electron-vite build",
-    "dev": "electron-vite dev",
+    "dev": "electron-vite dev --watch",
     "start": "electron .."
   },
   "devDependencies": {

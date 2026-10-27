@@ -29,9 +29,26 @@ export const SLACK_ENV_RELATIVE_PATH = path.join('extension', 'slack', '.env');
 export const GOOGLE_CALENDAR_CLIENT_ID_ENV = 'MULTITASKER_GOOGLE_CALENDAR_CLIENT_ID';
 export const GOOGLE_CALENDAR_CLIENT_SECRET_ENV = 'MULTITASKER_GOOGLE_CALENDAR_CLIENT_SECRET';
 export const GITHUB_TOKEN_ENV = 'MULTITASKER_GITHUB_TOKEN';
+export const GITHUB_CLIENT_ID_ENV = 'MULTITASKER_GITHUB_CLIENT_ID';
+export const GITHUB_CLIENT_SECRET_ENV = 'MULTITASKER_GITHUB_CLIENT_SECRET';
+export const GITHUB_REDIRECT_URI_ENV = 'MULTITASKER_GITHUB_REDIRECT_URI';
+export const GITHUB_POLL_MINUTES_ENV = 'MULTITASKER_GITHUB_POLL_MINUTES';
+export const JIRA_CLIENT_ID_ENV = 'MULTITASKER_JIRA_CLIENT_ID';
+export const JIRA_CLIENT_SECRET_ENV = 'MULTITASKER_JIRA_CLIENT_SECRET';
+export const JIRA_REDIRECT_URI_ENV = 'MULTITASKER_JIRA_REDIRECT_URI';
+export const JIRA_SITE_URL_ENV = 'MULTITASKER_JIRA_SITE_URL';
+export const JIRA_JQL_ENV = 'MULTITASKER_JIRA_JQL';
+export const JIRA_POLL_MINUTES_ENV = 'MULTITASKER_JIRA_POLL_MINUTES';
 export const GOOGLE_CALENDAR_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 export const GITHUB_API_BASE_URL = 'https://api.github.com';
+export const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
+export const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
+export const JIRA_AUTHORIZE_URL = 'https://auth.atlassian.com/authorize';
+export const JIRA_TOKEN_URL = 'https://auth.atlassian.com/oauth/token';
+export const JIRA_ACCESSIBLE_RESOURCES_URL = 'https://api.atlassian.com/oauth/token/accessible-resources';
 export const DEFAULT_GITHUB_REVIEW_POLL_MINUTES = 5;
+export const DEFAULT_JIRA_POLL_MINUTES = 30;
+export const DEFAULT_JIRA_JQL = 'sprint = "Ready to refine"';
 export const SERVER_ENV_FILE_NAMES = ['.env', '.env.local'];
 
 export function readBackendPort(): number {

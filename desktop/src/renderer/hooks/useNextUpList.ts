@@ -18,11 +18,6 @@ interface PausedSession {
   lastActivity?: number;
 }
 
-interface BackendPauseResponse {
-  ok?: boolean;
-  session?: PausedSession;
-}
-
 interface BackendNextUpResponse {
   ok?: boolean;
   nextUp?: NextUpItem[];
@@ -105,34 +100,12 @@ export function useNextUpList() {
   const pauseItem = async (item: NextUpItem): Promise<void> => {
     if (item.source !== 'session') return;
     try {
-      let backendError: unknown = null;
-      let session = await pauseSessionViaBackend(item.id).catch((error: unknown) => {
-        backendError = error;
-        return null;
-      });
-      if (!isPausedSession(session)) {
-        const pauseSession = window.electronAPI.pauseSession;
-        const ipcSession = typeof pauseSession === 'function'
-          ? await pauseSession(item.id) as PausedSession | null | undefined
-          : null;
-        if (ipcSession) session = ipcSession;
-      }
-      if (!session) {
-        if (backendError instanceof Error) throw backendError;
-        return;
-      }
-
+      const pauseSession = window.electronAPI.pauseSession;
+      if (typeof pauseSession !== 'function') throw new Error('Pause is unavailable.');
+      const session = await pauseSession(item.id) as PausedSession | null | undefined;
+      if (!isPausedSession(session)) throw new Error('The session could not be paused.');
       updatePausedItem(item.key, session);
-      const backendItems = await fetchBackendNextUp().catch(() => null);
-      if (backendItems) {
-        setItems(backendItems);
-        setError(null);
-        return;
-      }
-
-      await load(false);
-      updatePausedItem(item.key, session);
-      if (!isPausedSession(session) && backendError instanceof Error) throw backendError;
+      setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to pause session');
     }
@@ -155,18 +128,6 @@ export function useNextUpList() {
 
 function isPausedSession(session: PausedSession | null | undefined): session is PausedSession {
   return session?.status === 'paused';
-}
-
-async function pauseSessionViaBackend(id: string): Promise<PausedSession | null> {
-  const response = await fetch(`${BACKEND_BASE_URL}/api/session/pause`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id }),
-  });
-  if (!response.ok) throw new Error(`Failed to pause session (${response.status})`);
-
-  const payload = (await response.json()) as BackendPauseResponse;
-  return payload.session ?? null;
 }
 
 async function fetchBackendNextUp(): Promise<NextUpItem[]> {

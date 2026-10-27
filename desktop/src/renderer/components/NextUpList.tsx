@@ -171,6 +171,12 @@ export function NextUpList() {
       return;
     }
     if (item.source === 'slack') {
+      const openSlackNotification = window.electronAPI.openSlackNotification;
+      if (typeof openSlackNotification === 'function') {
+        void openSlackNotification(item.id).catch((error: unknown) => {
+          console.error('Failed to open Slack notification:', error);
+        });
+      }
       if (window.showSlackHistory) {
         window.showSlackHistory(item.id);
       } else {

@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Multitasker Text Assistant",
+  "description": "Améliore le texte du champ actif avec le moteur IA local de Multitasker.",
+  "version": "0.2.0",
+  "minimum_chrome_version": "99",
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:39017/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Multitasker Text Assistant",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "file:///*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

@@ -1,180 +1,136 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import type { ServerResponse } from 'node:http';
 import type { HttpModule, RouteDef } from '../../core/types';
-import type { GitHubPullRequest } from '../../types';
-import { loadSettings } from '../../../shared/settings';
-import {
-  seenGitHubReviewRequestKeys,
-  getGitHubReviewTimer,
-  setGitHubReviewTimer,
-  isGitHubReviewPollInFlight,
-  setGitHubReviewPollInFlight,
-} from '../../state/github';
-import { getStorageDirectory } from '../../state/sessions';
-import { getServerEnvValue } from '../../core/env';
+import { writeJsonResponse } from '../../core/body';
 import { getErrorMessage } from '../../core/util';
-import { GITHUB_TOKEN_ENV, GITHUB_API_BASE_URL, DEFAULT_GITHUB_REVIEW_POLL_MINUTES } from '../../core/constants';
-import { truncateTaskText } from '../../utils/date';
-import { isRecord, readStringField } from '../../utils/payload';
-import { publishIntegrationManualTask } from '../manual-tasks/integrations';
+import {
+  completeGitHubAuthorization,
+  createGitHubAuthorizationUrl,
+  hasGitHubTokenFallback,
+  isGitHubOAuthConfigured,
+} from './auth';
+import {
+  getGitHubPollMinutes,
+  pollGitHubReviewRequests,
+  startGitHubReviewScheduler,
+  stopGitHubReviewScheduler,
+} from './scheduler';
+import {
+  clearGitHubConnection,
+  getGitHubConnection,
+  getGitHubPollingStatus,
+  loadGitHubState,
+} from './state';
 
-export function startGitHubReviewScheduler(): void {
-  stopGitHubReviewScheduler();
-  void pollGitHubReviewRequests();
-  setGitHubReviewTimer(setInterval(() => {
-    void pollGitHubReviewRequests();
-  }, getGitHubReviewPollIntervalMs()));
-}
-
-export function stopGitHubReviewScheduler(): void {
-  const timer = getGitHubReviewTimer();
-  if (!timer) return;
-  clearInterval(timer);
-  setGitHubReviewTimer(null);
-}
-
-function getGitHubReviewPollIntervalMs(): number {
-  const settings = loadSettings().githubReview;
-  const pollMinutes = Number.isFinite(settings.pollMinutes)
-    ? Math.max(1, Math.min(60, Math.floor(settings.pollMinutes)))
-    : DEFAULT_GITHUB_REVIEW_POLL_MINUTES;
-  return pollMinutes * 60 * 1000;
-}
-
-async function pollGitHubReviewRequests(): Promise<void> {
-  if (isGitHubReviewPollInFlight()) return;
-  const settings = loadSettings().githubReview;
-  if (!settings.enabled) return;
-  if (!settings.owner.trim() || !settings.repo.trim()) return;
-
-  const token = getServerEnvValue(GITHUB_TOKEN_ENV).trim();
-  if (!token) return;
-
-  setGitHubReviewPollInFlight(true);
-  try {
-    const viewerLogin = await fetchGitHubViewerLogin(token);
-    if (!viewerLogin) return;
-    const prs = await fetchOpenPullRequests(settings.owner, settings.repo, token);
-    const now = Date.now();
-    let changed = false;
-    for (const pr of prs) {
-      if (!isPullRequestRequestedForViewer(pr, viewerLogin)) continue;
-      const requestKey = `${settings.owner}/${settings.repo}#${pr.number}`;
-      if (seenGitHubReviewRequestKeys.has(requestKey)) continue;
-      seenGitHubReviewRequestKeys.add(requestKey);
-      changed = true;
-      publishIntegrationManualTask({
-        id: `manual-${randomUUID()}`,
-        text: truncateTaskText(`Review PR ${requestKey}: ${pr.title} (${pr.html_url})`),
-        createdAt: now,
-      });
-    }
-    if (changed) saveSeenGitHubReviewRequests();
-  } catch (error) {
-    console.error(`GitHub review polling failed: ${getErrorMessage(error)}`);
-  } finally {
-    setGitHubReviewPollInFlight(false);
-  }
-}
-
-function isPullRequestRequestedForViewer(pr: GitHubPullRequest, viewerLogin: string): boolean {
-  if (pr.draft) return false;
-  const requestedReviewers = Array.isArray(pr.requested_reviewers) ? pr.requested_reviewers : [];
-  return requestedReviewers.some(reviewer => reviewer?.login?.toLowerCase() === viewerLogin.toLowerCase());
-}
-
-async function fetchGitHubViewerLogin(token: string): Promise<string> {
-  const response = await fetch(`${GITHUB_API_BASE_URL}/user`, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'multitasker-local-backend',
-    },
-  });
-  const body = parseJsonResponseBody(await response.text());
-  if (!response.ok || !isRecord(body)) {
-    throw new Error(`GitHub /user failed (${response.status})`);
-  }
-  return readStringField(body, 'login').trim();
-}
-
-async function fetchOpenPullRequests(owner: string, repo: string, token: string): Promise<GitHubPullRequest[]> {
-  const url = new URL(`${GITHUB_API_BASE_URL}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls`);
-  url.searchParams.set('state', 'open');
-  url.searchParams.set('sort', 'updated');
-  url.searchParams.set('direction', 'desc');
-  url.searchParams.set('per_page', '50');
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'multitasker-local-backend',
-    },
-  });
-  const body = parseJsonResponseBody(await response.text());
-  if (!response.ok || !Array.isArray(body)) {
-    throw new Error(`GitHub pulls listing failed (${response.status})`);
-  }
-  return body.filter(isGitHubPullRequest);
-}
-
-function isGitHubPullRequest(value: unknown): value is GitHubPullRequest {
-  if (!isRecord(value)) return false;
-  if (!Number.isInteger(value['number'])) return false;
-  if (typeof value['title'] !== 'string' || !value['title'].trim()) return false;
-  if (typeof value['html_url'] !== 'string' || !value['html_url'].trim()) return false;
-  if (value['requested_reviewers'] !== undefined && !Array.isArray(value['requested_reviewers'])) return false;
-  if (value['draft'] !== undefined && typeof value['draft'] !== 'boolean') return false;
-  return true;
-}
-
-function parseJsonResponseBody(rawBody: string): unknown {
-  if (!rawBody.trim()) return {};
-  try {
-    return JSON.parse(rawBody);
-  } catch {
-    return rawBody;
-  }
-}
-
-export function loadSeenGitHubReviewRequests(): void {
-  seenGitHubReviewRequestKeys.clear();
-  try {
-    const raw = fs.readFileSync(getGitHubReviewSeenPath(), 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-    for (const value of parsed) {
-      if (typeof value === 'string' && value.trim()) seenGitHubReviewRequestKeys.add(value.trim());
-    }
-  } catch {
-    // No previous file yet.
-  }
-}
-
-function saveSeenGitHubReviewRequests(): void {
-  const filePath = getGitHubReviewSeenPath();
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify([...seenGitHubReviewRequestKeys], null, 2));
-}
-
-function getGitHubReviewSeenPath(): string {
-  const baseDirectory = getStorageDirectory() || path.join(process.cwd(), '.multitasker-data');
-  return path.join(baseDirectory, 'github-review-seen.json');
-}
+export { startGitHubReviewScheduler } from './scheduler';
 
 export const githubReviewsModule: HttpModule = {
   name: 'github-reviews',
   init() {
-    loadSeenGitHubReviewRequests();
+    loadGitHubState();
     startGitHubReviewScheduler();
   },
   dispose() {
     stopGitHubReviewScheduler();
   },
   routes(): RouteDef[] {
-    return [];
+    return [
+      {
+        method: 'GET',
+        path: '/api/github/status',
+        handler({ response }) {
+          const connection = getGitHubConnection();
+          const tokenFallback = hasGitHubTokenFallback();
+          writeJsonResponse(response, 200, {
+            ok: true,
+            configured: isGitHubOAuthConfigured() || tokenFallback,
+            oauthConfigured: isGitHubOAuthConfigured(),
+            connected: Boolean(connection) || tokenFallback,
+            authMode: connection ? 'oauth' : tokenFallback ? 'token' : null,
+            account: connection ? {
+              login: connection.login,
+              avatarUrl: connection.avatarUrl,
+              profileUrl: connection.profileUrl,
+            } : null,
+            pollMinutes: getGitHubPollMinutes(),
+            connectUrl: '/api/github/oauth/start',
+            ...getGitHubPollingStatus(),
+          });
+        },
+      },
+      {
+        method: 'GET',
+        path: '/api/github/oauth/start',
+        handler({ response }) {
+          try {
+            response.writeHead(302, { Location: createGitHubAuthorizationUrl() });
+            response.end();
+          } catch (error) {
+            writeJsonResponse(response, 400, { ok: false, error: getErrorMessage(error) });
+          }
+        },
+      },
+      {
+        method: 'GET',
+        path: '/api/github/oauth/callback',
+        async handler({ url, response }) {
+          const oauthError = url.searchParams.get('error');
+          if (oauthError) {
+            writeOAuthResult(response, 400, 'GitHub connection failed', url.searchParams.get('error_description') || oauthError);
+            return;
+          }
+          try {
+            const connection = await completeGitHubAuthorization(
+              url.searchParams.get('code') || '',
+              url.searchParams.get('state') || '',
+            );
+            writeOAuthResult(response, 200, 'GitHub connected', `Connected as ${connection.login}. You can close this window.`);
+            void pollGitHubReviewRequests().catch(error => {
+              console.error(`Initial GitHub review polling failed: ${getErrorMessage(error)}`);
+            });
+          } catch (error) {
+            writeOAuthResult(response, 400, 'GitHub connection failed', getErrorMessage(error));
+          }
+        },
+      },
+      {
+        method: 'POST',
+        path: '/api/github/poll',
+        async handler({ response }) {
+          try {
+            const result = await pollGitHubReviewRequests();
+            writeJsonResponse(response, 200, { ok: true, ...result });
+          } catch (error) {
+            writeJsonResponse(response, 502, { ok: false, error: getErrorMessage(error) });
+          }
+        },
+      },
+      {
+        method: 'POST',
+        path: '/api/github/disconnect',
+        handler({ response }) {
+          clearGitHubConnection();
+          writeJsonResponse(response, 200, { ok: true });
+        },
+      },
+    ];
   },
 };
+
+function writeOAuthResult(response: ServerResponse, statusCode: number, title: string, message: string): void {
+  const body = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>` +
+    `<body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body></html>`;
+  response.writeHead(statusCode, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
+  response.end(body);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}

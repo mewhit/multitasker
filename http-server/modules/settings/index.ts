@@ -26,6 +26,9 @@ export const settingsModule: HttpModule = {
           const settings = payload as Partial<AppSettings>;
           const currentSettings = loadSettings();
           saveSettings({
+            annoyingNotifications: typeof settings.annoyingNotifications === 'boolean'
+              ? settings.annoyingNotifications
+              : currentSettings.annoyingNotifications,
             reviewTool: typeof settings.reviewTool === 'string' ? settings.reviewTool : currentSettings.reviewTool,
             defaultShell: isLocalShellType(settings.defaultShell) ? settings.defaultShell : currentSettings.defaultShell,
             googleCalendar: typeof settings.googleCalendar === 'object' && settings.googleCalendar !== null
@@ -34,6 +37,9 @@ export const settingsModule: HttpModule = {
             githubReview: typeof settings.githubReview === 'object' && settings.githubReview !== null
               ? settings.githubReview
               : currentSettings.githubReview,
+            installedPlugins: Array.isArray(settings.installedPlugins)
+              ? settings.installedPlugins
+              : currentSettings.installedPlugins,
           });
           startGitHubReviewScheduler();
           writeJsonResponse(response, 200, { ok: true, settings: loadSettings() });

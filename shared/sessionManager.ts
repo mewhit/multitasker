@@ -71,6 +71,7 @@ interface SessionEntry {
   createdAt: number;
   lastEffectiveUpdateAt: number;
   lastTerminalUpdateAt: number;
+  lastDirectoryUpdateAt?: number;
   statusChangedAt: number;
   gitCheckTimeout: ReturnType<typeof setTimeout> | null;
 }
@@ -117,8 +118,10 @@ export class SessionManager extends EventEmitter {
       }
       if (trimmedTerminalRef) existingEntry.session.terminalRef = trimmedTerminalRef;
       if (terminalPid !== undefined) existingEntry.session.terminalPid = terminalPid;
-      if (existingEntry.session.status !== INITIAL_SESSION_STATUS) existingEntry.statusChangedAt = now;
-      existingEntry.session.status = INITIAL_SESSION_STATUS;
+      if (existingEntry.session.status !== 'paused') {
+        if (existingEntry.session.status !== INITIAL_SESSION_STATUS) existingEntry.statusChangedAt = now;
+        existingEntry.session.status = INITIAL_SESSION_STATUS;
+      }
       existingEntry.session.lastActivity = now;
       delete existingEntry.session.terminalExitCode;
       delete existingEntry.session.terminalExitReason;
@@ -178,8 +181,11 @@ export class SessionManager extends EventEmitter {
     const entry = this.sessions.get(update.id);
     if (!entry) return null;
     if (entry.session.status === 'detached') return { ...entry.session };
-    if (entry.session.status === 'paused' && update.status !== 'running') return { ...entry.session };
     if (update.occurredAt < entry.lastTerminalUpdateAt) return { ...entry.session };
+    if (entry.session.status === 'paused') {
+      entry.lastTerminalUpdateAt = update.occurredAt;
+      return { ...entry.session };
+    }
 
     return this.applyTerminalUpdate(entry, update);
   }
@@ -192,6 +198,18 @@ export class SessionManager extends EventEmitter {
     const entry = this.sessions.get(event.id);
     if (!entry) return null;
     if (entry.session.status === 'detached' && !this.restoreDetachedSessionFromTerminalEvent(entry, event)) {
+      return { session: { ...entry.session } };
+    }
+    if (event.type === 'terminal_cwd') {
+      if (event.terminalCwd && event.occurredAt >= (entry.lastDirectoryUpdateAt ?? 0)) {
+        entry.lastDirectoryUpdateAt = event.occurredAt;
+        if (entry.session.cwd !== event.terminalCwd) {
+          entry.session.cwd = event.terminalCwd;
+          entry.session.gitChanges = false;
+          this.emitUpdateDebounced();
+          this.scheduleGitChangesCheck(entry);
+        }
+      }
       return { session: { ...entry.session } };
     }
     if (event.occurredAt < entry.lastTerminalUpdateAt) return { session: { ...entry.session } };
@@ -209,7 +227,7 @@ export class SessionManager extends EventEmitter {
       return { session: { ...entry.session } };
     }
 
-    if (entry.session.status === 'paused' && update.status !== 'running') {
+    if (entry.session.status === 'paused') {
       entry.lastTerminalUpdateAt = event.occurredAt;
       if (bindingChanged) this.emitUpdateDebounced();
       return { session: { ...entry.session } };
@@ -238,6 +256,20 @@ export class SessionManager extends EventEmitter {
     entry.statusChangedAt = now;
     entry.lastEffectiveUpdateAt = now;
     this.emit('sessionUpdate', this.getSessions());
+    return { ...entry.session };
+  }
+
+  resumeSession(id: string, occurredAt = Date.now()): Session | null {
+    const entry = this.sessions.get(id);
+    if (!entry) return null;
+    if (entry.session.status !== 'paused') return { ...entry.session };
+
+    entry.session.status = 'needs_attention';
+    entry.session.lastActivity = occurredAt;
+    entry.statusChangedAt = occurredAt;
+    entry.lastEffectiveUpdateAt = Math.max(entry.lastEffectiveUpdateAt, occurredAt, Date.now());
+    this.emit('sessionUpdate', this.getSessions());
+    this.scheduleGitChangesCheck(entry);
     return { ...entry.session };
   }
 
@@ -435,7 +467,9 @@ export class SessionManager extends EventEmitter {
     }
 
     return new Promise((resolve) => {
-      exec('git status --porcelain', { cwd: entry.session.cwd }, (err, stdout) => {
+      const cwd = entry.session.cwd;
+      exec('git status --porcelain', { cwd }, (err, stdout) => {
+        if (entry.session.cwd !== cwd) { resolve(); return; }
         const newGitChanges = !err && stdout.trim().length > 0;
         if (entry.session.gitChanges !== newGitChanges) {
           entry.session.gitChanges = newGitChanges;

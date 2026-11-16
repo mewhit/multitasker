@@ -346,8 +346,10 @@ function slackNotificationUrl(notification: SlackNotificationState): string {
   const teamId = notification.teamId?.trim() ?? '';
   if (teamId) url.searchParams.set('team', teamId);
   url.searchParams.set('id', channelId);
-  const messageTs = notification.ts?.trim() || notification.threadTs?.trim() || '';
+  const threadTs = notification.threadTs?.trim() ?? '';
+  const messageTs = threadTs || notification.ts?.trim() || '';
   if (messageTs) url.searchParams.set('message', messageTs);
+  if (threadTs) url.searchParams.set('thread_ts', threadTs);
   return url.toString();
 }
 
@@ -377,8 +379,11 @@ function displaySlackUserName(value: string): string {
 }
 
 function isGenericSlackDmLabel(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return normalized === 'dm' || normalized === 'direct message';
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, ' ');
+  return normalized === 'dm' ||
+    normalized === 'direct message' ||
+    normalized === 'dm message' ||
+    /(^|[\s-])dm message$/.test(normalized);
 }
 
 function isRawSlackChannelId(value: string): boolean {

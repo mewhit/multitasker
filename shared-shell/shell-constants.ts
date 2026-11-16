@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { POWERSHELL_DIRECTORY_PROMPT } from './current-directory';
 
 export const DEFAULT_PORT = 4321;
 export const DEFAULT_HOST = '127.0.0.1';
@@ -62,13 +63,13 @@ export function defaultShellArgs(shell: string): string[] {
     return process.env['SHELL_ARGS'].split(/\s+/).filter(Boolean);
   }
   const base = shell.toLowerCase();
-  if (base.endsWith('pwsh.exe') || base.endsWith('pwsh')) return ['-NoLogo'];
+  if (base.endsWith('pwsh.exe') || base.endsWith('pwsh')) return ['-NoLogo', '-NoExit', '-Command', POWERSHELL_DIRECTORY_PROMPT];
   if (base.endsWith('powershell.exe')) {
     // Windows PowerShell 5.1's PSReadLine freezes inside ConPTY after a
     // few keystrokes (input handler deadlocks). Removing PSReadLine on
     // start avoids the freeze; the user loses syntax highlighting and
     // history search but the prompt stays responsive.
-    return ['-NoLogo', '-NoProfile', '-NoExit', '-Command', 'Remove-Module PSReadLine -ErrorAction SilentlyContinue'];
+    return ['-NoLogo', '-NoProfile', '-NoExit', '-Command', `Remove-Module PSReadLine -ErrorAction SilentlyContinue; ${POWERSHELL_DIRECTORY_PROMPT}`];
   }
   return [];
 }

@@ -6,11 +6,15 @@ export type LocalShellType = 'powershell' | 'bash';
 export type ShellType = LocalShellType | 'ssh';
 
 export interface AppSettings {
+  annoyingNotifications: boolean;
   reviewTool: string;
   defaultShell: LocalShellType;
   googleCalendar: GoogleCalendarSettings;
   githubReview: GitHubReviewSettings;
+  installedPlugins: PluginId[];
 }
+
+export type PluginId = 'ai';
 
 export interface GoogleCalendarSettings {
   calendarId: string;
@@ -152,6 +156,7 @@ export interface SlackNotificationState {
 export type { NextUpState };
 
 const DEFAULT_SETTINGS: AppSettings = {
+  annoyingNotifications: false,
   reviewTool: 'code {path}',
   defaultShell: process.platform === 'win32' ? 'powershell' : 'bash',
   googleCalendar: {
@@ -166,6 +171,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     repo: '',
     pollMinutes: 5,
   },
+  installedPlugins: [],
 };
 const DATA_DIR_ENV = 'MULTITASKER_DATA_DIR';
 let storageDirectoryOverride = '';
@@ -199,8 +205,10 @@ function normalizeSettings(value: unknown): AppSettings {
   return {
     reviewTool,
     defaultShell,
+    annoyingNotifications: value['annoyingNotifications'] === true,
     googleCalendar: normalizeGoogleCalendarSettings(value['googleCalendar']),
     githubReview: normalizeGitHubReviewSettings(value['githubReview']),
+    installedPlugins: normalizeInstalledPlugins(value['installedPlugins']),
   };
 }
 
@@ -208,7 +216,14 @@ function getDefaultSettings(): AppSettings {
   return {
     ...DEFAULT_SETTINGS,
     googleCalendar: { ...DEFAULT_SETTINGS.googleCalendar },
+    githubReview: { ...DEFAULT_SETTINGS.githubReview },
+    installedPlugins: [...DEFAULT_SETTINGS.installedPlugins],
   };
+}
+
+function normalizeInstalledPlugins(value: unknown): PluginId[] {
+  if (!Array.isArray(value)) return [];
+  return value.includes('ai') ? ['ai'] : [];
 }
 
 function normalizeGoogleCalendarSettings(value: unknown): GoogleCalendarSettings {

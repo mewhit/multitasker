@@ -72,12 +72,4 @@ export interface GoogleCalendarOAuthConfig {
   clientSecret: string;
 }
 
-export interface GitHubPullRequest {
-  number: number;
-  title: string;
-  html_url: string;
-  requested_reviewers?: Array<{ login?: string }>;
-  draft?: boolean;
-}
-
 export { TerminalBinding };

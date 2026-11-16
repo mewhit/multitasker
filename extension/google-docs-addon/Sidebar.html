@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <style>
+      :root { font-family: Arial, sans-serif; color: #202124; }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 16px; background: #fff; }
+      h1 { margin: 0; font-size: 18px; }
+      h2 { margin: 20px 0 8px; font-size: 13px; }
+      summary { cursor: pointer; font-size: 12px; font-weight: 700; }
+      .subtitle { margin: 4px 0 14px; color: #5f6368; font-size: 12px; line-height: 1.4; }
+      .status { margin-bottom: 12px; padding: 8px 9px; border-radius: 7px; background: #fef7e0; color: #8d5b00; font-size: 11px; line-height: 1.4; }
+      .status.ready { background: #e6f4ea; color: #137333; }
+      .status.error { background: #fce8e6; color: #b3261e; }
+      label { display: block; margin: 12px 0 5px; color: #5f6368; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+      input, select, textarea { width: 100%; padding: 9px; color: #202124; background: #fff; border: 1px solid #dadce0; border-radius: 7px; outline: none; font: 12px/1.45 Arial, sans-serif; }
+      textarea { min-height: 82px; resize: vertical; }
+      input:focus, select:focus, textarea:focus { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
+      #result { min-height: 145px; background: #f8fbff; }
+      .row { display: flex; gap: 7px; margin-top: 8px; }
+      button { flex: 1; min-height: 34px; padding: 7px 9px; color: #3c4043; background: #fff; border: 1px solid #dadce0; border-radius: 6px; cursor: pointer; font: 600 11px Arial, sans-serif; }
+      button:hover:not(:disabled) { background: #f1f3f4; }
+      button.primary { color: #fff; background: #1a73e8; border-color: #1a73e8; }
+      button.primary:hover:not(:disabled) { background: #1765cc; }
+      button.danger { color: #b3261e; }
+      button:disabled { opacity: .45; cursor: default; }
+      .notice { margin-top: 7px; color: #5f6368; font-size: 10px; line-height: 1.4; }
+      .message { margin-top: 10px; padding: 8px 9px; border-radius: 6px; font-size: 11px; line-height: 1.4; }
+      .message.error { color: #b3261e; background: #fce8e6; }
+      .message.success { color: #137333; background: #e6f4ea; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Edit with AI</h1>
+    <p class="subtitle">Sélectionnez du texte, donnez un prompt et remplacez la sélection.</p>
+
+    <div id="api-status" class="status">Vérification de l’API…</div>
+    <details id="settings">
+      <summary>Configuration de l’API</summary>
+      <p id="api-url" class="notice"></p>
+      <label for="api-token">Token Bearer</label>
+      <input id="api-token" type="password" autocomplete="off" placeholder="API_AUTH_TOKEN">
+      <p class="notice">Le token est conservé dans vos propriétés privées Apps Script et n’est jamais renvoyé à cette sidebar.</p>
+
+      <label for="model">Modèle</label>
+      <select id="model"></select>
+
+      <label for="reasoning-effort">Effort de raisonnement</label>
+      <select id="reasoning-effort"></select>
+
+      <div class="row">
+        <button id="save-settings" class="primary" type="button">Enregistrer</button>
+        <button id="refresh-options" type="button">Actualiser</button>
+      </div>
+      <div class="row">
+        <button id="clear-token" class="danger" type="button">Supprimer le token</button>
+      </div>
+    </details>
+
+    <h2>Modifier le texte sélectionné</h2>
+    <label for="source">Sélection du document</label>
+    <textarea id="source" placeholder="Sélectionnez du texte dans le document, puis rechargez la sélection."></textarea>
+    <div class="row">
+      <button id="reload-selection" type="button">Recharger la sélection</button>
+    </div>
+    <p id="selection-notice" class="notice"></p>
+
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt">Améliore ce texte pour qu’il soit clair, naturel et prêt à envoyer. Conserve sa langue, son sens, son ton et ses détails factuels.</textarea>
+    <div class="row">
+      <button id="generate" class="primary" type="button" disabled>Générer</button>
+    </div>
+
+    <div id="result-block" class="hidden">
+      <label for="result">Résultat modifiable</label>
+      <textarea id="result"></textarea>
+      <div class="row">
+        <button id="copy" type="button">Copier</button>
+        <button id="replace" class="primary" type="button">Remplacer la sélection</button>
+      </div>
+      <label for="followup">Autre modification</label>
+      <textarea id="followup" placeholder="Ex. Plus court, plus chaleureux, ou traduis en anglais."></textarea>
+      <div class="row">
+        <button id="refine" type="button">Améliorer encore</button>
+      </div>
+    </div>
+
+    <div id="message" class="message hidden" role="alert"></div>
+
+    <script>
+      const FALLBACK_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.2'];
+      const FALLBACK_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+      const state = {
+        configured: false,
+        loading: false,
+        rangeId: '',
+        messages: [],
+      };
+      const elements = {
+        apiStatus: document.querySelector('#api-status'),
+        settings: document.querySelector('#settings'),
+        apiUrl: document.querySelector('#api-url'),
+        apiToken: document.querySelector('#api-token'),
+        model: document.querySelector('#model'),
+        reasoningEffort: document.querySelector('#reasoning-effort'),
+        saveSettings: document.querySelector('#save-settings'),
+        refreshOptions: document.querySelector('#refresh-options'),
+        clearToken: document.querySelector('#clear-token'),
+        source: document.querySelector('#source'),
+        reloadSelection: document.querySelector('#reload-selection'),
+        selectionNotice: document.querySelector('#selection-notice'),
+        prompt: document.querySelector('#prompt'),
+        generate: document.querySelector('#generate'),
+        resultBlock: document.querySelector('#result-block'),
+        result: document.querySelector('#result'),
+        copy: document.querySelector('#copy'),
+        replace: document.querySelector('#replace'),
+        followup: document.querySelector('#followup'),
+        refine: document.querySelector('#refine'),
+        message: document.querySelector('#message'),
+      };
+
+      elements.saveSettings.addEventListener('click', saveSettings);
+      elements.refreshOptions.addEventListener('click', loadSettings);
+      elements.clearToken.addEventListener('click', clearToken);
+      elements.reloadSelection.addEventListener('click', captureSelection);
+      elements.generate.addEventListener('click', () => generate(false));
+      elements.refine.addEventListener('click', () => generate(true));
+      elements.copy.addEventListener('click', copyResult);
+      elements.replace.addEventListener('click', replaceSelection);
+      elements.prompt.addEventListener('keydown', handleGenerateShortcut);
+      elements.followup.addEventListener('keydown', handleGenerateShortcut);
+
+      loadSettings();
+      captureSelection();
+
+      function loadSettings() {
+        setMessage('', '');
+        elements.refreshOptions.disabled = true;
+        google.script.run
+          .withSuccessHandler(settings => {
+            elements.refreshOptions.disabled = false;
+            applySettings(settings);
+          })
+          .withFailureHandler(error => {
+            elements.refreshOptions.disabled = false;
+            setMessage(errorMessage(error), 'error');
+          })
+          .getSuggestionApiSettings();
+      }
+
+      function applySettings(settings) {
+        state.configured = settings?.configured === true;
+        elements.apiUrl.textContent = settings?.apiBaseUrl || 'https://mike-codex.fly.dev';
+        populateSelect(elements.model, settings?.models || FALLBACK_MODELS, settings?.model || 'gpt-5.6-sol');
+        populateSelect(
+          elements.reasoningEffort,
+          settings?.reasoningEfforts || FALLBACK_EFFORTS,
+          settings?.reasoningEffort || 'low'
+        );
+        elements.apiStatus.className = state.configured
+          ? (settings?.optionsError ? 'status error' : 'status ready')
+          : 'status';
+        elements.apiStatus.textContent = !state.configured
+          ? 'Ajoutez le token Bearer de votre API avant de générer.'
+          : settings?.optionsError
+            ? 'Token enregistré, mais /api/models ne répond pas: ' + settings.optionsError
+            : 'API connectée; modèles et efforts chargés.';
+        elements.settings.open = !state.configured || Boolean(settings?.optionsError);
+        elements.generate.disabled = state.loading || !state.configured;
+      }
+
+      function saveSettings() {
+        setMessage('', '');
+        elements.saveSettings.disabled = true;
+        google.script.run
+          .withSuccessHandler(settings => {
+            elements.saveSettings.disabled = false;
+            elements.apiToken.value = '';
+            applySettings(settings);
+            setMessage(
+              settings?.optionsError
+                ? 'Configuration enregistrée; la validation distante a échoué.'
+                : 'Configuration enregistrée et validée.',
+              settings?.optionsError ? 'error' : 'success'
+            );
+          })
+          .withFailureHandler(error => {
+            elements.saveSettings.disabled = false;
+            setMessage(errorMessage(error), 'error');
+          })
+          .saveSuggestionApiSettings(
+            elements.apiToken.value,
+            elements.model.value,
+            elements.reasoningEffort.value
+          );
+      }
+
+      function clearToken() {
+        elements.clearToken.disabled = true;
+        google.script.run
+          .withSuccessHandler(settings => {
+            elements.clearToken.disabled = false;
+            applySettings(settings);
+            setMessage('Token API supprimé.', 'success');
+          })
+          .withFailureHandler(error => {
+            elements.clearToken.disabled = false;
+            setMessage(errorMessage(error), 'error');
+          })
+          .clearSuggestionApiToken();
+      }
+
+      function captureSelection() {
+        setMessage('', '');
+        elements.reloadSelection.disabled = true;
+        google.script.run
+          .withSuccessHandler(snapshot => {
+            elements.reloadSelection.disabled = false;
+            state.rangeId = snapshot?.rangeId || '';
+            elements.source.value = snapshot?.text || '';
+            elements.selectionNotice.textContent = snapshot?.notice || '';
+          })
+          .withFailureHandler(error => {
+            elements.reloadSelection.disabled = false;
+            setMessage(errorMessage(error), 'error');
+          })
+          .captureSelection();
+      }
+
+      function generate(refine) {
+        if (state.loading || !state.configured) return;
+        const instruction = (refine ? elements.followup.value : elements.prompt.value).trim();
+        const text = refine ? elements.result.value : elements.source.value;
+        if (!instruction) {
+          setMessage('Entrez un prompt avant de générer.', 'error');
+          return;
+        }
+        if (!refine) state.messages = [];
+        const context = [...state.messages];
+        state.messages.push({
+          role: 'user',
+          text: text ? instruction + '\n\nTexte:\n' + text : instruction,
+        });
+        setLoading(true);
+        setMessage('', '');
+        google.script.run
+          .withSuccessHandler(response => {
+            state.messages.push({ role: 'assistant', text: response.text });
+            elements.result.value = response.text;
+            elements.followup.value = '';
+            elements.resultBlock.classList.remove('hidden');
+            setLoading(false);
+          })
+          .withFailureHandler(error => {
+            state.messages = context;
+            setLoading(false);
+            setMessage(errorMessage(error), 'error');
+          })
+          .editTextWithSuggestionApi(instruction, text, context);
+      }
+
+      function replaceSelection() {
+        if (!state.rangeId || !elements.result.value) {
+          setMessage('Rechargez une sélection et générez un résultat avant de remplacer.', 'error');
+          return;
+        }
+        setLoading(true);
+        google.script.run
+          .withSuccessHandler(result => {
+            state.rangeId = '';
+            setLoading(false);
+            setMessage(result?.message || 'Sélection remplacée.', 'success');
+          })
+          .withFailureHandler(error => {
+            setLoading(false);
+            setMessage(errorMessage(error), 'error');
+          })
+          .replaceCapturedSelection(state.rangeId, elements.result.value);
+      }
+
+      async function copyResult() {
+        try {
+          await navigator.clipboard.writeText(elements.result.value);
+          setMessage('Résultat copié.', 'success');
+        } catch {
+          elements.result.focus();
+          elements.result.select();
+          setMessage('La copie a été bloquée; le résultat est sélectionné.', 'error');
+        }
+      }
+
+      function populateSelect(select, options, selected) {
+        const values = Array.from(new Set([...(Array.isArray(options) ? options : []), selected])).filter(Boolean);
+        select.replaceChildren(...values.map(value => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = value;
+          option.selected = value === selected;
+          return option;
+        }));
+      }
+
+      function setLoading(loading) {
+        state.loading = loading;
+        elements.generate.disabled = loading || !state.configured;
+        elements.refine.disabled = loading;
+        elements.replace.disabled = loading;
+        elements.reloadSelection.disabled = loading;
+        elements.generate.textContent = loading ? 'Génération…' : 'Générer';
+      }
+
+      function setMessage(text, kind) {
+        elements.message.textContent = text;
+        elements.message.className = text ? 'message ' + kind : 'message hidden';
+      }
+
+      function handleGenerateShortcut(event) {
+        if (event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey)) return;
+        event.preventDefault();
+        generate(event.target === elements.followup);
+      }
+
+      function errorMessage(error) {
+        return error?.message || String(error);
+      }
+    </script>
+  </body>
+</html>

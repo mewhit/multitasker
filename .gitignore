@@ -7,5 +7,8 @@ debug-log/
 .DS_Store
 Thumbs.db
 dist/
+release/
 http-server/.multitasker-data/sessions.json
 http-server/.multitasker-data/next-up.json
+**/.multitasker-data/jira-state.json
+**/.multitasker-data/github-state.json

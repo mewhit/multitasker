@@ -28,7 +28,10 @@ export interface AppSettings {
   defaultShell: LocalShellType;
   googleCalendar: GoogleCalendarSettings;
   githubReview: GitHubReviewSettings;
+  installedPlugins: PluginId[];
 }
+
+export type PluginId = 'ai';
 
 export interface GoogleCalendarSettings {
   calendarId: string;
@@ -98,6 +101,69 @@ export interface SlackAuthStatus {
   message: string;
 }
 
+export interface SlackWorkspaceSummary {
+  teamId: string;
+  teamName: string;
+  userId: string;
+  botScopes: string[];
+  userScopes: string[];
+  connectedAt: number;
+}
+
+export interface JiraSiteStatus {
+  cloudId: string;
+  name: string;
+  url: string;
+}
+
+export interface JiraStatus {
+  configured: boolean;
+  connected: boolean;
+  site: JiraSiteStatus | null;
+  preferredSiteUrl: string;
+  jql: string;
+  pollMinutes: number;
+  trackedIssueCount: number;
+  lastPolledAt?: number;
+  lastError?: string;
+}
+
+export interface JiraActionResult {
+  ok: boolean;
+  message: string;
+  status: JiraStatus;
+}
+
+export interface GitHubAccountStatus {
+  login: string;
+  avatarUrl: string;
+  profileUrl: string;
+}
+
+export interface GitHubStatus {
+  configured: boolean;
+  oauthConfigured: boolean;
+  connected: boolean;
+  authMode: 'oauth' | 'token' | null;
+  account: GitHubAccountStatus | null;
+  pollMinutes: number;
+  trackedReviewRequestCount: number;
+  lastPolledAt?: number;
+  lastError?: string;
+}
+
+export interface GitHubActionResult {
+  ok: boolean;
+  message: string;
+  status: GitHubStatus;
+}
+
+export interface TerminalClipboardPaste {
+  source: 'image' | 'text' | 'empty';
+  text: string;
+  filePath?: string;
+}
+
 export interface SessionState {
   id?: string;
   name: string;
@@ -135,6 +201,22 @@ export interface SlackNotification {
   priorityLabel?: 'mention' | 'dm' | 'thread_mention' | 'thread_written' | 'other';
 }
 
+export interface SlackHistoryMessage {
+  ts: string;
+  text: string;
+  userId?: string;
+  userName: string;
+  sentAt: number;
+  selected: boolean;
+}
+
+export interface SlackConversationHistory {
+  notificationId: string;
+  title: string;
+  kind: 'thread' | 'channel';
+  messages: SlackHistoryMessage[];
+}
+
 export type RecurringTaskFrequency = 'weekly' | 'daily' | 'interval' | 'monthly';
 
 export interface RecurringTaskSchedule {
@@ -160,6 +242,14 @@ export interface RecurringTask {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  getTimers: () => ipcRenderer.invoke('timer:list'),
+  addTimer: (text: string, seconds: number, sound: import('../timerTasks.js').TimerSound) => ipcRenderer.invoke('timer:add', text, seconds, sound),
+  removeTimer: (id: string) => ipcRenderer.invoke('timer:remove', id),
+  onTimersUpdate: (callback: (tasks: import('../timerTasks.js').TimerTask[]) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, tasks: import('../timerTasks.js').TimerTask[]) => callback(tasks);
+    ipcRenderer.on('timer:list-update', listener);
+    return () => ipcRenderer.removeListener('timer:list-update', listener);
+  },
   createSession: (name: string, cmd: string, cwd: string, shellType: ShellType, sshCommand = ''): Promise<Session | null> =>
     ipcRenderer.invoke('session:create', name, cmd, cwd, shellType, sshCommand),
 
@@ -178,11 +268,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getShellServerConfig: (): Promise<{ url: string; token: string }> =>
     ipcRenderer.invoke('shell:get-config'),
 
+  readTerminalClipboard: (): Promise<TerminalClipboardPaste> =>
+    ipcRenderer.invoke('clipboard:read-terminal-paste'),
+
+  setWindowInputAttention: (active: boolean): void =>
+    ipcRenderer.send('window:set-input-attention', active),
+
+  requestWindowAttention: (): void =>
+    ipcRenderer.send('window:request-attention'),
+
   removeSession: (id: string): Promise<void> =>
     ipcRenderer.invoke('session:remove', id),
 
   pauseSession: (id: string): Promise<Session | null> =>
     ipcRenderer.invoke('session:pause', id),
+
+  resumeSession: (id: string): Promise<Session | null> =>
+    ipcRenderer.invoke('session:resume', id),
 
   renameSession: (id: string, name: string): Promise<Session | null> =>
     ipcRenderer.invoke('session:rename', id, name),
@@ -228,6 +330,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getSlackNotifications: (): Promise<SlackNotification[]> =>
     ipcRenderer.invoke('slack-notification:list'),
+
+  getSlackConversationHistory: (id: string): Promise<SlackConversationHistory> =>
+    ipcRenderer.invoke('slack-notification:history', id),
+
+  sendSlackMessage: (id: string, text: string): Promise<SlackHistoryMessage> =>
+    ipcRenderer.invoke('slack-notification:send', id, text),
 
   openSlackNotification: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('slack-notification:open', id),
@@ -287,9 +395,51 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startSlackAuth: (): Promise<SlackAuthStatus> =>
     ipcRenderer.invoke('slack:auth:start'),
 
+  getSlackWorkspaces: (): Promise<SlackWorkspaceSummary[]> =>
+    ipcRenderer.invoke('slack:workspace:list'),
+
+  removeSlackWorkspace: (teamId: string): Promise<boolean> =>
+    ipcRenderer.invoke('slack:workspace:remove', teamId),
+
   onSlackAuthStatus: (cb: (status: SlackAuthStatus) => void): void => {
     ipcRenderer.on('slack:auth-status', (_event, status: SlackAuthStatus) => cb(status));
   },
+
+  getJiraStatus: (): Promise<JiraStatus> =>
+    ipcRenderer.invoke('jira:status'),
+
+  connectJira: (): Promise<JiraActionResult> =>
+    ipcRenderer.invoke('jira:connect'),
+
+  disconnectJira: (): Promise<JiraActionResult> =>
+    ipcRenderer.invoke('jira:disconnect'),
+
+  pollJira: (): Promise<JiraActionResult> =>
+    ipcRenderer.invoke('jira:poll'),
+
+  getGitHubStatus: (): Promise<GitHubStatus> =>
+    ipcRenderer.invoke('github:status'),
+
+  connectGitHub: (): Promise<GitHubActionResult> =>
+    ipcRenderer.invoke('github:connect'),
+
+  disconnectGitHub: (): Promise<GitHubActionResult> =>
+    ipcRenderer.invoke('github:disconnect'),
+
+  pollGitHub: (): Promise<GitHubActionResult> =>
+    ipcRenderer.invoke('github:poll'),
+
+  getInstalledPlugins: (): Promise<PluginId[]> =>
+    ipcRenderer.invoke('plugin:list'),
+
+  onOpenPluginManager: (cb: () => void): (() => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('plugin:open-manager', listener);
+    return () => { ipcRenderer.removeListener('plugin:open-manager', listener); };
+  },
+
+  setPluginInstalled: (pluginId: PluginId, installed: boolean): Promise<PluginId[]> =>
+    ipcRenderer.invoke('plugin:set-installed', pluginId, installed),
 
   getSettings: (): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:get'),

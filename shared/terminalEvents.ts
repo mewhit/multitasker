@@ -1,6 +1,7 @@
 import type { SessionStatus, TerminalUpdate } from './sessionManager';
 
 export type TerminalEventType =
+  | 'terminal_cwd'
   | 'terminal_opened'
   | 'terminal_attached'
   | 'terminal_capture_state'
@@ -199,6 +200,8 @@ export class TerminalEventParser {
     if (event.shellType) state.shellType = event.shellType;
 
     switch (event.type) {
+      case 'terminal_cwd':
+        return null;
       case 'terminal_opened':
         this.resetState(state);
         return this.handleTerminalOpened(event, state);

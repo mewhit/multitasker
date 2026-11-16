@@ -1,6 +1,6 @@
 {
   "name": "multitasker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Multitasker monorepo",
   "main": "dist/desktop/src/main.js",
@@ -26,7 +26,12 @@
     "start:shell": "npm run start --prefix shell",
     "start:ws": "npm run start --prefix ws-server",
     "shell": "node scripts\\run-shell.js",
-    "shell:dev": "concurrently -k -n shell,ws-server -c yellow,magenta \"npm run dev --prefix shell\" \"npm run dev --prefix ws-server\""
+    "shell:dev": "concurrently -k -n shell,ws-server -c yellow,magenta \"npm run dev --prefix shell\" \"npm run dev --prefix ws-server\"",
+    "start:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start-multitasker.ps1",
+    "install:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\install-windows.ps1",
+    "setup:windows": "powershell -NoProfile -STA -ExecutionPolicy Bypass -File scripts\\setup-wizard.ps1",
+    "package:windows": "node scripts/package-windows.cjs",
+    "uninstall:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\uninstall-windows.ps1"
   },
   "keywords": [],
   "author": "",

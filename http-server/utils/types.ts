@@ -25,6 +25,7 @@ export function isSessionStatus(value: string): value is SessionStatus {
 
 export function isTerminalEventType(value: string): value is TerminalEventType {
   return (
+    value === 'terminal_cwd' ||
     value === 'terminal_opened' ||
     value === 'terminal_attached' ||
     value === 'terminal_capture_state' ||

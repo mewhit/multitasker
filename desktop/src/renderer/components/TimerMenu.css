@@ -1,0 +1,16 @@
+.plugin-menu.timer-menu { position: fixed; top: 100px; left: 12px; right: auto; width: 370px; max-width: calc(100vw - 24px); max-height: calc(100vh - 112px); overflow-y: auto; padding: 16px; box-sizing: border-box; }
+.timer-menu h3 { margin: 0 0 14px; }
+.timer-sound { margin-top: 12px; }
+.timer-menu label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.timer-menu input, .timer-menu select { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; background: #0d1117; }
+.timer-presets { display: flex; gap: 8px; margin: 12px 0; }
+.timer-duration { display: flex; gap: 8px; align-items: end; }
+.timer-duration label { flex: 1; min-width: 0; }
+.timer-hint, .timer-row small { color: #8b949e; font-size: 12px; line-height: 1.5; }
+.timer-list { max-height: 320px; overflow-y: auto; }
+.timer-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid #30363d; }
+.timer-row > div { min-width: 0; overflow-wrap: anywhere; }
+.timer-row > button { flex-shrink: 0; }
+.timer-countdown { font-size: 18px; font-variant-numeric: tabular-nums; margin: 4px 0; }
+.timer-finished .timer-countdown, .timer-alert { color: #f2cc60 !important; }
+.timer-error { color: #ff7b72; }

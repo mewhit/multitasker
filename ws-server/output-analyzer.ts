@@ -304,6 +304,25 @@ export class OutputAnalyzer {
       const sinceInput = state.lastUserInputAt > 0 ? now - state.lastUserInputAt : Infinity;
       const inInputGrace = sinceInput < STDIN_INPUT_GRACE_MS;
 
+      // Approval dialogs can redraw while waiting (including arrow-key selection).
+      // Require the question, choices and selection footer together so ordinary
+      // agent prose or an old question in the transcript cannot override activity.
+      const bottomLines = bottomNonEmptyLines(state.term, BOTTOM_SCAN_LINES);
+      const bottomBlock = bottomLines.join('\n');
+      const approvalQuestion = bottomLines.find(line =>
+        /\bDo you want to (?:run this command|allow|approve|proceed)\b/i.test(line));
+      const approvalVisible = approvalQuestion &&
+        /\b1\.\s+Yes\b/i.test(bottomBlock) &&
+        /\b\d+\.\s+No\b/i.test(bottomBlock) &&
+        /\benter\s+to\s+select\b/i.test(bottomBlock);
+      if (approvalVisible) {
+        const change = this.transition(
+          state, sessionId, 'needs_input', 'approval dialog awaiting selection', now, approvalQuestion,
+        );
+        if (change) out.push({ sessionId, change });
+        continue;
+      }
+
       if (screenChanged) {
         if (state.lastStatus !== 'working') {
           const suppressReason = this.getWorkingSuppressionReason(state, now);
@@ -339,8 +358,6 @@ export class OutputAnalyzer {
         continue;
       }
 
-      const bottomLines = bottomNonEmptyLines(state.term, BOTTOM_SCAN_LINES);
-      const bottomBlock = bottomLines.join('\n');
       // Walk the bottom lines from the very last upward and look for the
       // first prompt match. Agents like codex keep a permanent footer line
       // (e.g. "  gpt-5.5 xhigh Â· C:\dev\robot") below their input prompt

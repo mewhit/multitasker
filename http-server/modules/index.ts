@@ -7,10 +7,12 @@ import { googleCalendarModule } from './google-calendar';
 import { manualTasksModule } from './manual-tasks';
 import { recurringTasksModule } from './recurring-tasks';
 import { githubReviewsModule } from './github-reviews';
+import { jiraModule } from './jira';
 import { terminalsModule } from './terminals';
 import { sessionsModule } from './sessions';
 import { slackModule } from './slack';
 import { databaseModule } from './database';
+import { textModule } from './text';
 export const modules: HttpModule[] = [
   healthModule,
   databaseModule,
@@ -21,7 +23,9 @@ export const modules: HttpModule[] = [
   manualTasksModule,
   recurringTasksModule,
   githubReviewsModule,
+  jiraModule,
   terminalsModule,
   sessionsModule,
   slackModule,
+  textModule,
 ];

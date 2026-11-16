@@ -1,0 +1,7 @@
+{
+  "name": "multitasker-packaging",
+  "private": true,
+  "devDependencies": {
+    "electron-builder": "26.18.0"
+  }
+}

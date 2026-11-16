@@ -1,19 +1,6 @@
 [
   {
-    "id": "e0df5d82-e9cc-4cbd-ac7b-f7129103881a",
-    "name": "multitasker",
-    "cmd": "",
-    "cwd": "C:\\dev\\multitasker",
-    "shellType": "powershell",
-    "clientMetadata": {
-      "kind": "vscode",
-      "workspace": "C:\\dev\\multitasker",
-      "version": "1.122.1",
-      "termProgram": "vscode"
-    }
-  },
-  {
-    "id": "0d3baddc-5d5f-4bf2-9197-4a265ca49d3f",
+    "id": "a6c7a116-f91c-4ba0-8540-481dc644bd7c",
     "name": "happyhead",
     "cmd": "",
     "cwd": "C:\\dev\\happyhead",
@@ -21,20 +8,27 @@
     "clientMetadata": {
       "kind": "vscode",
       "workspace": "C:\\dev\\happyhead",
-      "version": "1.122.1",
+      "version": "1.138.0",
       "termProgram": "vscode"
     }
   },
   {
-    "id": "4f5eb3f3-6d1f-4dc7-8f8e-b89ad745a1b0",
-    "name": "server",
+    "id": "be22830e-1974-4b53-9c6e-b5c18d41e02f",
+    "name": "Printer",
     "cmd": "",
-    "cwd": "C:\\dev\\happyhead\\backoffice\\server",
+    "cwd": "C:\\Users\\Mike",
+    "shellType": "powershell"
+  },
+  {
+    "id": "e1e57b7d-f151-41ca-80fd-ea83ad06adbf",
+    "name": "multitasker",
+    "cmd": "",
+    "cwd": "C:\\dev\\multitasker",
     "shellType": "powershell",
     "clientMetadata": {
       "kind": "vscode",
-      "workspace": "C:\\dev\\happyhead\\backoffice\\server",
-      "version": "1.122.1",
+      "workspace": "C:\\dev\\multitasker",
+      "version": "1.138.0",
       "termProgram": "vscode"
     }
   }

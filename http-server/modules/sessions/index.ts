@@ -100,6 +100,25 @@ export const sessionsModule: HttpModule = {
             return;
           }
           const session = sessionManager.touchSession(id);
+          if (session) saveSessions(getSessionsStateToSave());
+          writeJsonResponse(response, 200, { ok: true, session });
+        },
+      },
+      {
+        method: 'POST',
+        path: '/api/session/resume',
+        handler({ payload, response }) {
+          const id = readPayloadString(payload, 'id').trim();
+          if (!id) {
+            writeJsonResponse(response, 400, { ok: false, error: 'missing_session_id' });
+            return;
+          }
+          const session = sessionManager.resumeSession(id);
+          if (!session) {
+            writeJsonResponse(response, 404, { ok: false, error: 'session_not_found' });
+            return;
+          }
+          saveSessions(getSessionsStateToSave());
           writeJsonResponse(response, 200, { ok: true, session });
         },
       },

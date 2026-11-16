@@ -1,4 +1,5 @@
 import type { ServerResponse } from 'node:http';
+import { reviewPreviewRoutes } from './preview-routes';
 import type { HttpModule, RouteDef } from '../../core/types';
 import { writeJsonResponse } from '../../core/body';
 import { getErrorMessage } from '../../core/util';
@@ -34,6 +35,7 @@ export const githubReviewsModule: HttpModule = {
   },
   routes(): RouteDef[] {
     return [
+      ...reviewPreviewRoutes(),
       {
         method: 'GET',
         path: '/api/github/status',

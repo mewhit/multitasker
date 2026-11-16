@@ -1,0 +1,19 @@
+.modal.github-reviews { width: min(1100px, 95vw); max-width: 95vw; max-height: 90vh; overflow: auto; }
+.github-reviews header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.github-reviews p { color: #aab5c3; margin: 10px 0; }
+.github-reviews details { margin: 12px 0; }
+.github-reviews form { display: grid; gap: 10px; padding: 12px 0; }
+.github-reviews label { display: grid; gap: 6px; margin: 10px 0; }
+.github-reviews input:not([type=checkbox]), .github-reviews textarea { width: 100%; box-sizing: border-box; background: #0d1117; color: #e6edf3; border: 1px solid #384454; border-radius: 6px; padding: 9px; }
+.github-reviews textarea { resize: vertical; font: inherit; line-height: 1.5; }
+.review-columns { display: grid; grid-template-columns: minmax(180px, 28%) 1fr; gap: 20px; margin-top: 16px; }
+.review-columns nav { display: flex; flex-direction: column; gap: 8px; }
+.review-columns nav button { text-align: left; display: grid; gap: 6px; padding: 12px; background: #161b22; border: 1px solid #384454; border-radius: 6px; color: #e6edf3; overflow-wrap: anywhere; }
+.review-columns nav button.selected { border-color: #58a6ff; }
+.review-columns main { min-width: 0; }
+.review-columns a { color: #58a6ff; }
+.review-comment { padding: 12px; margin: 12px 0; border: 1px solid #384454; border-radius: 6px; overflow-wrap: anywhere; }
+.review-comment textarea { margin: 10px 0; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.github-reviews .review-error { color: #ff8d85; }
+@media (max-width: 650px) { .review-columns { grid-template-columns: 1fr; } .review-columns nav { max-height: 180px; overflow: auto; } }

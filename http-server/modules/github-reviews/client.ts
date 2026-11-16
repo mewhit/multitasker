@@ -22,9 +22,11 @@ export async function fetchGitHubViewer(token: string): Promise<GitHubViewer> {
 
 export async function fetchGitHubReviewNotifications(token: string): Promise<GitHubNotification[]> {
   const notificationsById = new Map<string, GitHubNotification>();
+  let viewer: GitHubViewer | undefined;
   for (let page = 1; page <= MAX_NOTIFICATION_PAGES; page += 1) {
     const url = new URL(`${GITHUB_API_BASE_URL}/notifications`);
-    url.searchParams.set('all', 'false');
+    // Reading a GitHub notification must not hide an outstanding review request.
+    url.searchParams.set('all', 'true');
     url.searchParams.set('participating', 'true');
     url.searchParams.set('per_page', '50');
     url.searchParams.set('page', String(page));
@@ -37,12 +39,32 @@ export async function fetchGitHubReviewNotifications(token: string): Promise<Git
     for (const value of payload) {
       const notification = normalizeNotification(value);
       if (notification?.reason === 'review_requested' && notification.subjectType === 'PullRequest') {
+        if (!notification.unread) {
+          viewer ??= await fetchGitHubViewer(token);
+          if (!await isOutstandingDirectReview(notification, viewer.login, token)) continue;
+        }
         notificationsById.set(notification.id, notification);
       }
     }
     if (payload.length < 50) return [...notificationsById.values()];
   }
   throw new Error(`GitHub notifications lookup exceeded ${MAX_NOTIFICATION_PAGES} pages`);
+}
+
+async function isOutstandingDirectReview(notification: GitHubNotification, login: string, token: string): Promise<boolean> {
+  let url: URL;
+  try { url = new URL(notification.subjectUrl); } catch { return false; }
+  if (url.origin !== GITHUB_API_BASE_URL || !/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(url.pathname)) return false;
+  const response = await githubFetch(url, token);
+  if (response.status === 404 || response.status === 410) return false;
+  const rawBody = await response.text();
+  const payload = parseJsonResponseBody(rawBody);
+  if (!response.ok || !isRecord(payload)) {
+    throw new Error(`GitHub review lookup failed (${response.status}): ${readGitHubError(payload, rawBody)}`);
+  }
+  if (payload['state'] !== 'open' || !Array.isArray(payload['requested_reviewers'])) return false;
+  return payload['requested_reviewers'].some(reviewer =>
+    isRecord(reviewer) && readStringField(reviewer, 'login').toLowerCase() === login.toLowerCase());
 }
 
 function githubFetch(pathOrUrl: string | URL, token: string): Promise<Response> {

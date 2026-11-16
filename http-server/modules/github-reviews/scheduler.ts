@@ -21,6 +21,7 @@ import {
   setTrackedGitHubReviewRequestIds,
 } from './state';
 import type { GitHubNotification, GitHubPollResult } from './types';
+import { queueReviewPreviews } from './previews';
 
 export function startGitHubReviewScheduler(): void {
   stopGitHubReviewScheduler();
@@ -58,6 +59,8 @@ export async function pollGitHubReviewRequests(): Promise<GitHubPollResult> {
     const previousIds = new Set(getTrackedGitHubReviewRequestIds());
     const newNotifications = notifications.filter(notification => !previousIds.has(notification.id));
     for (const notification of newNotifications) publishReviewTask(notification);
+    try { queueReviewPreviews(notifications); }
+    catch (error) { console.error(`GitHub prevalidation queue failed: ${getErrorMessage(error)}`); }
     setTrackedGitHubReviewRequestIds(notifications.map(notification => notification.id));
     recordGitHubPollSuccess();
     return {

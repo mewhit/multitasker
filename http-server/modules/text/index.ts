@@ -75,14 +75,19 @@ function readTextContext(value: unknown): TextContextMessage[] {
 }
 
 async function runCodexText(instruction: string, text: string, context: TextContextMessage[]): Promise<string> {
+  return runCodexPrompt(buildTextPrompt(instruction, text, context));
+}
+
+export async function runCodexPrompt(prompt: string, schema?: object): Promise<string> {
   const outputDirectory = path.resolve(process.cwd(), '.tmp', 'text');
   await fs.promises.mkdir(outputDirectory, { recursive: true });
   const outputPath = path.join(outputDirectory, `${randomUUID()}.txt`);
+  const schemaPath = schema ? `${outputPath}.schema.json` : undefined;
   const invocation = resolveCodexInvocation();
-  const prompt = buildTextPrompt(instruction, text, context);
 
   try {
-    await spawnCodex(invocation, outputPath, prompt);
+    if (schemaPath) await fs.promises.writeFile(schemaPath, JSON.stringify(schema));
+    await spawnCodex(invocation, outputPath, prompt, schemaPath);
     const stats = await fs.promises.stat(outputPath);
     if (stats.size > MAX_CODEX_OUTPUT_BYTES) throw new Error('Codex returned too much text.');
     const result = (await fs.promises.readFile(outputPath, 'utf8')).trim();
@@ -90,6 +95,7 @@ async function runCodexText(instruction: string, text: string, context: TextCont
     return result;
   } finally {
     await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
+    if (schemaPath) await fs.promises.rm(schemaPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -136,7 +142,7 @@ function buildTextPrompt(instruction: string, text: string, context: TextContext
   ].join('\n');
 }
 
-function spawnCodex(invocation: CodexInvocation, outputPath: string, prompt: string): Promise<void> {
+function spawnCodex(invocation: CodexInvocation, outputPath: string, prompt: string, schemaPath?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(invocation.executable, [...invocation.prefixArgs,
       'exec',
@@ -149,6 +155,7 @@ function spawnCodex(invocation: CodexInvocation, outputPath: string, prompt: str
       'never',
       '--output-last-message',
       outputPath,
+      ...(schemaPath ? ['--output-schema', schemaPath] : []),
       '-',
     ], {
       cwd: process.cwd(),

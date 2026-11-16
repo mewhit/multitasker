@@ -420,6 +420,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getGitHubStatus: (): Promise<GitHubStatus> =>
     ipcRenderer.invoke('github:status'),
 
+  getGitHubPreviews: () => ipcRenderer.invoke('github:previews'),
+  githubPreviewAction: (payload: unknown) => ipcRenderer.invoke('github:preview-action', payload),
+
   connectGitHub: (): Promise<GitHubActionResult> =>
     ipcRenderer.invoke('github:connect'),
 

@@ -12,3 +12,5 @@ http-server/.multitasker-data/sessions.json
 http-server/.multitasker-data/next-up.json
 **/.multitasker-data/jira-state.json
 **/.multitasker-data/github-state.json
+**/.multitasker-data/github-review-drafts.json
+**/.multitasker-data/github-review-drafts.json.tmp

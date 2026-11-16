@@ -12,6 +12,7 @@ import { NextUpList } from './components/NextUpList';
 import { SlackHistoryPanel } from './components/SlackHistoryPanel';
 import { PluginMenu } from './components/PluginMenu';
 import { TimerMenu } from './components/TimerMenu';
+import { GitHubReviews } from './components/GitHubReviews';
 
 declare global {
   interface Window {
@@ -112,7 +113,7 @@ function installPluginMenu(): void {
     window.__MULTITASKER_PLUGIN_MENU_ROOT__ = createRoot(host);
     window.__MULTITASKER_PLUGIN_MENU_HOST__ = host;
   }
-  window.__MULTITASKER_PLUGIN_MENU_ROOT__.render(<div className="nav-menus"><TimerMenu /><PluginMenu /></div>);
+  window.__MULTITASKER_PLUGIN_MENU_ROOT__.render(<div className="nav-menus"><GitHubReviews /><TimerMenu /><PluginMenu /></div>);
 }
 
 function installSlackHistoryPanel(): void {

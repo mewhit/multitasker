@@ -3988,6 +3988,8 @@ function setupGitHubIpc(): void {
   ipcMain.handle("github:connect", () => startGitHubAuth());
   ipcMain.handle("github:disconnect", () => disconnectGitHub());
   ipcMain.handle("github:poll", () => pollGitHubNow());
+  ipcMain.handle("github:previews", () => getStandaloneBackend('/api/github/previews'));
+  ipcMain.handle("github:preview-action", (_event, payload: unknown) => postStandaloneBackend('/api/github/previews', payload));
 }
 
 async function registerAppShellSession(

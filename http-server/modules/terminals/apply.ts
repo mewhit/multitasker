@@ -57,6 +57,7 @@ export function applyTerminalEvent(event: TerminalEvent): boolean {
     return false;
   }
   const { session, statusUpdate } = result;
+  if (previousSession?.cwd !== session.cwd) saveSessions(getSessionsStateToSave());
   debugTerminalUpdate('terminal event applied', {
     ...terminalEventDebugDetails(event, session.name),
     ...terminalEventStatusDebugDetails(statusUpdate),

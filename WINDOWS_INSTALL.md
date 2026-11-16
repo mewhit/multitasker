@@ -2,7 +2,7 @@
 
 ## Standalone EXE installer (recommended)
 
-Open `release\Multitasker-Setup-1.0.1.exe`. The installer includes Electron,
+Open `release\Multitasker-Setup-1.1.0.exe`. The installer includes Electron,
 Node.js, the desktop UI, and the three local services. Users do not need Node.js
 or the source checkout. The wizard supports choosing the installation directory,
 creates shortcuts, and enables **Start Multitasker when I sign in to Windows**

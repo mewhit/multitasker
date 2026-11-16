@@ -1,5 +1,6 @@
-import { app, BrowserWindow, clipboard, ipcMain, dialog, shell, screen, type BrowserWindowConstructorOptions, type Rectangle } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, dialog, Menu, shell, screen, type BrowserWindowConstructorOptions, type Rectangle } from "electron";
 import path from "node:path";
+import { startTimers } from './timers.js';
 import fs from "node:fs";
 import { exec, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -339,6 +340,7 @@ function isSessionStatus(value: string): value is SessionStatus {
 
 function isTerminalEventType(value: string): value is TerminalEventType {
   return (
+    value === "terminal_cwd" ||
     value === "terminal_opened" ||
     value === "terminal_attached" ||
     value === "terminal_capture_state" ||
@@ -3783,6 +3785,28 @@ function setupLegacyIpc(): void {
     }
   });
 
+  ipcMain.handle("session:resume", async (_e, id: unknown) => {
+    const sessionId = typeof id === "string" ? id.trim() : "";
+    if (!sessionId) return null;
+    try {
+      const shouldUseStandaloneBackend = backendEventsSyncEnabled || await isStandaloneBackendHealthy();
+      if (shouldUseStandaloneBackend) {
+        if (!backendEventsSyncEnabled) startStandaloneBackendSync();
+        const response = await postStandaloneBackend("/api/session/resume", { id: sessionId });
+        const session = normalizeBackendSession(response["session"]);
+        if (!session) return null;
+        applyStandaloneBackendSession(session);
+        return session;
+      }
+      const session = sessionManager?.resumeSession(sessionId) ?? null;
+      if (session) saveSessions(getSessionsStateToSave());
+      return session;
+    } catch (error) {
+      console.error(`Failed to resume session: ${getErrorMessage(error)}`);
+      return null;
+    }
+  });
+
   ipcMain.handle("session:list", () => {
     if (!standaloneBackendSessions) sessionManager?.refreshGitChanges();
     return getCurrentSessions();
@@ -4380,6 +4404,43 @@ function saveWindowStateForWindow(window: BrowserWindow): void {
   });
 }
 
+function installApplicationMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    {
+      label: 'Plugins',
+      submenu: [{
+        label: 'Manage plugins…',
+        click: () => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('plugin:open-manager');
+          }
+        },
+      }],
+    },
+    {
+      label: 'Help',
+      submenu: [{
+        label: 'Version',
+        click: () => {
+          const options = {
+            type: 'info' as const,
+            title: 'Multitasker',
+            message: `Multitasker ${app.getVersion()}`,
+            buttons: ['OK'],
+          };
+          if (mainWindow) void dialog.showMessageBox(mainWindow, options);
+          else void dialog.showMessageBox(options);
+        },
+      }],
+    },
+  ]));
+}
+
 function createWindow(): void {
   sessionManager = new SessionManager();
   const savedWindowState = getRestorableWindowState();
@@ -4394,6 +4455,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
+      autoplayPolicy: 'no-user-gesture-required',
     },
   };
   if (savedWindowState) {
@@ -4432,6 +4494,8 @@ function createWindow(): void {
   }
 }
 
+let stopTimers: (() => void) | undefined;
+
 void app.whenReady().then(async () => {
   const hasSingleInstanceLock = app.requestSingleInstanceLock();
   if (!hasSingleInstanceLock) {
@@ -4448,7 +4512,9 @@ void app.whenReady().then(async () => {
 
   setStorageDirectory(app.getPath("userData"));
   setupIpc();
+  installApplicationMenu();
   createWindow();
+  stopTimers = startTimers(() => mainWindow);
   await startTerminalUpdateServer();
 
   app.on("activate", () => {
@@ -4459,6 +4525,7 @@ void app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
+  stopTimers?.();
   stopRecurringTaskScheduler();
   stopGoogleCalendarScheduler();
   stopStandaloneBackendSync();

@@ -88,6 +88,10 @@ export class MultitaskerClient {
     }
   }
 
+  async sendCurrentDirectory(id: string, terminalCwd: string, occurredAt: number): Promise<void> {
+    await this.post('/terminal-event', { id, type: 'terminal_cwd', terminalCwd, occurredAt });
+  }
+
   private post<T>(path: string, body: unknown): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const payload = Buffer.from(JSON.stringify(body), 'utf8');

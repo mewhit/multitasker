@@ -71,6 +71,7 @@ interface SessionEntry {
   createdAt: number;
   lastEffectiveUpdateAt: number;
   lastTerminalUpdateAt: number;
+  lastDirectoryUpdateAt?: number;
   statusChangedAt: number;
   gitCheckTimeout: ReturnType<typeof setTimeout> | null;
 }
@@ -117,8 +118,10 @@ export class SessionManager extends EventEmitter {
       }
       if (trimmedTerminalRef) existingEntry.session.terminalRef = trimmedTerminalRef;
       if (terminalPid !== undefined) existingEntry.session.terminalPid = terminalPid;
-      if (existingEntry.session.status !== INITIAL_SESSION_STATUS) existingEntry.statusChangedAt = now;
-      existingEntry.session.status = INITIAL_SESSION_STATUS;
+      if (existingEntry.session.status !== 'paused') {
+        if (existingEntry.session.status !== INITIAL_SESSION_STATUS) existingEntry.statusChangedAt = now;
+        existingEntry.session.status = INITIAL_SESSION_STATUS;
+      }
       existingEntry.session.lastActivity = now;
       delete existingEntry.session.terminalExitCode;
       delete existingEntry.session.terminalExitReason;
@@ -197,6 +200,18 @@ export class SessionManager extends EventEmitter {
     if (entry.session.status === 'detached' && !this.restoreDetachedSessionFromTerminalEvent(entry, event)) {
       return { session: { ...entry.session } };
     }
+    if (event.type === 'terminal_cwd') {
+      if (event.terminalCwd && event.occurredAt >= (entry.lastDirectoryUpdateAt ?? 0)) {
+        entry.lastDirectoryUpdateAt = event.occurredAt;
+        if (entry.session.cwd !== event.terminalCwd) {
+          entry.session.cwd = event.terminalCwd;
+          entry.session.gitChanges = false;
+          this.emitUpdateDebounced();
+          this.scheduleGitChangesCheck(entry);
+        }
+      }
+      return { session: { ...entry.session } };
+    }
     if (event.occurredAt < entry.lastTerminalUpdateAt) return { session: { ...entry.session } };
 
     const terminalBinding: TerminalBinding = {};
@@ -244,7 +259,7 @@ export class SessionManager extends EventEmitter {
     return { ...entry.session };
   }
 
-  resumePausedSessionFromUserInput(id: string, occurredAt = Date.now()): Session | null {
+  resumeSession(id: string, occurredAt = Date.now()): Session | null {
     const entry = this.sessions.get(id);
     if (!entry) return null;
     if (entry.session.status !== 'paused') return { ...entry.session };
@@ -452,7 +467,9 @@ export class SessionManager extends EventEmitter {
     }
 
     return new Promise((resolve) => {
-      exec('git status --porcelain', { cwd: entry.session.cwd }, (err, stdout) => {
+      const cwd = entry.session.cwd;
+      exec('git status --porcelain', { cwd }, (err, stdout) => {
+        if (entry.session.cwd !== cwd) { resolve(); return; }
         const newGitChanges = !err && stdout.trim().length > 0;
         if (entry.session.gitChanges !== newGitChanges) {
           entry.session.gitChanges = newGitChanges;

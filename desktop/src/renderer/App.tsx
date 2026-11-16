@@ -11,11 +11,13 @@ import { legacyScript } from './legacyScript';
 import { NextUpList } from './components/NextUpList';
 import { SlackHistoryPanel } from './components/SlackHistoryPanel';
 import { PluginMenu } from './components/PluginMenu';
+import { TimerMenu } from './components/TimerMenu';
 
 declare global {
   interface Window {
     electronAPI: any;
     __MULTITASKER_RENDERER_INITIALIZED__?: boolean;
+    __MULTITASKER_INITIALIZED_SETTINGS_BUTTON__?: HTMLElement | null;
     __MULTITASKER_TERMINAL_INPUT_SOUND_CLEANUP__?: () => void;
     __MULTITASKER_DONE_FALLBACK_CLEANUP__?: () => void;
     __MULTITASKER_CONTEXT_MENU_AUTO_CLOSE_CLEANUP__?: () => void;
@@ -51,6 +53,13 @@ let terminalInputSoundWarningShown = false;
 
 export function App() {
   useEffect(() => {
+    // Replacing the legacy markup during hot reload removes its DOM listeners.
+    // Reload the renderer to rebuild both DOM and subscriptions together.
+    if (window.__MULTITASKER_RENDERER_INITIALIZED__ &&
+        window.__MULTITASKER_INITIALIZED_SETTINGS_BUTTON__ !== document.getElementById('btn-settings')) {
+      window.location.reload();
+      return;
+    }
     const cleanupTerminalInputNotification = reinstallTerminalInputNotification();
     installSlackHistoryPanel();
     installPluginMenu();
@@ -68,6 +77,7 @@ export function App() {
 
     const runLegacyRenderer = new Function('Terminal', legacyScript);
     runLegacyRenderer(TerminalWithRightClickCopy);
+    window.__MULTITASKER_INITIALIZED_SETTINGS_BUTTON__ = document.getElementById('btn-settings');
     hideLegacyGitHubReviewSettings();
     installReactNextUpList();
 
@@ -102,7 +112,7 @@ function installPluginMenu(): void {
     window.__MULTITASKER_PLUGIN_MENU_ROOT__ = createRoot(host);
     window.__MULTITASKER_PLUGIN_MENU_HOST__ = host;
   }
-  window.__MULTITASKER_PLUGIN_MENU_ROOT__.render(<PluginMenu />);
+  window.__MULTITASKER_PLUGIN_MENU_ROOT__.render(<div className="nav-menus"><TimerMenu /><PluginMenu /></div>);
 }
 
 function installSlackHistoryPanel(): void {

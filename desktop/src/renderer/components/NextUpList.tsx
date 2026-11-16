@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNextUpList, type NextUpItem } from '../hooks/useNextUpList';
+import { useAnnoyingNotifications } from '../hooks/useAnnoyingNotifications';
 
 type MenuState = { visible: boolean; key: string; x: number; y: number };
 
@@ -122,7 +123,8 @@ function renderItemBody(item: NextUpItem): React.ReactNode {
 }
 
 export function NextUpList() {
-  const { items, loading, error, markDone, moveItem, pauseItem } = useNextUpList();
+  const { items, loading, error, markDone, moveItem, pauseItem, resumeItem } = useNextUpList();
+  useAnnoyingNotifications(items);
   const [menu, setMenu] = useState<MenuState>({ visible: false, key: '', x: 0, y: 0 });
   const [selectedKey, setSelectedKey] = useState('');
   const menuTarget = useMemo(() => items.find((item) => item.key === menu.key) ?? null, [items, menu.key]);
@@ -234,11 +236,12 @@ export function NextUpList() {
               className="context-menu-item"
               onClick={() => {
                 runMenuAction(() => {
-                  if (canPauseSession(menuTarget)) void pauseItem(menuTarget);
+                  if (menuTarget.status === 'paused') void resumeItem(menuTarget);
+                  else if (canPauseSession(menuTarget)) void pauseItem(menuTarget);
                 });
               }}
             >
-              {normalizeStatus(menuTarget.status) === 'paused' ? 'Paused (waiting for activity)' : 'Pause'}
+              {normalizeStatus(menuTarget.status) === 'paused' ? 'Resume' : 'Pause'}
             </button>
           ) : null}
           <button

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type {
   GitHubActionResult,
   GitHubStatus,
@@ -9,7 +9,6 @@ import type {
 } from '../../preload/preload';
 
 export function PluginMenu() {
-  const [menuOpen, setMenuOpen] = useState(false);
   const [managerOpen, setManagerOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<SlackWorkspaceSummary[]>([]);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
@@ -17,7 +16,6 @@ export function PluginMenu() {
   const [aiInstalled, setAiInstalled] = useState(false);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
 
   const loadWorkspaces = async () => {
     const getWorkspaces = window.electronAPI?.getSlackWorkspaces;
@@ -63,16 +61,11 @@ export function PluginMenu() {
     void loadPlugins();
     void loadJiraStatus();
     void loadGitHubStatus();
-    const closeMenu = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setMenuOpen(false);
-    };
-    document.addEventListener('mousedown', closeMenu);
     window.electronAPI?.onSlackAuthStatus?.((nextStatus: SlackAuthStatus) => {
       setBusy(false);
       setStatus(nextStatus.message);
       if (nextStatus.ok) void loadWorkspaces();
     });
-    return () => document.removeEventListener('mousedown', closeMenu);
   }, []);
 
   useEffect(() => {
@@ -87,7 +80,6 @@ export function PluginMenu() {
   }, [managerOpen]);
 
   const openManager = () => {
-    setMenuOpen(false);
     setManagerOpen(true);
     setBusy(false);
     setStatus('');
@@ -96,6 +88,8 @@ export function PluginMenu() {
     void loadJiraStatus();
     void loadGitHubStatus();
   };
+
+  useEffect(() => window.electronAPI?.onOpenPluginManager?.(openManager), []);
 
   const setAiPluginInstalled = async (installed: boolean) => {
     if (busy) return;
@@ -229,50 +223,7 @@ export function PluginMenu() {
   };
 
   return (
-    <div className="plugin-nav" ref={rootRef}>
-      <button className="btn" id="btn-plugins" onClick={() => setMenuOpen((open) => !open)} aria-expanded={menuOpen}>
-        Plugins
-      </button>
-      {menuOpen ? (
-        <div className="plugin-menu" role="menu">
-          <button className="plugin-menu-row plugin-menu-add" role="menuitem" onClick={openManager}>
-            <span className="plugin-menu-icon">+</span>
-            <span>Add plugin</span>
-          </button>
-          <div className="plugin-menu-divider" />
-          {aiInstalled ? (
-            <button className="plugin-menu-row" role="menuitem" onClick={openManager}>
-              <span className="plugin-menu-icon">AI</span>
-              <span className="plugin-menu-copy">
-                <strong>AI</strong>
-                <small>Installed</small>
-              </span>
-            </button>
-          ) : null}
-          <button className="plugin-menu-row" role="menuitem" onClick={openManager}>
-            <span className="slack-logo">S</span>
-            <span className="plugin-menu-copy">
-              <strong>Slack</strong>
-              <small>{workspaces.length} {workspaces.length === 1 ? 'workspace' : 'workspaces'}</small>
-            </span>
-          </button>
-          <button className="plugin-menu-row" role="menuitem" onClick={openManager}>
-            <span className="jira-logo">J</span>
-            <span className="plugin-menu-copy">
-              <strong>Jira</strong>
-              <small>{jiraStatus?.connected ? jiraStatus.site?.name || 'Connected' : 'Not connected'}</small>
-            </span>
-          </button>
-          <button className="plugin-menu-row" role="menuitem" onClick={openManager}>
-            <span className="github-logo">GH</span>
-            <span className="plugin-menu-copy">
-              <strong>GitHub</strong>
-              <small>{githubStatus?.connected ? githubStatus.account?.login || 'Connected' : 'Not connected'}</small>
-            </span>
-          </button>
-        </div>
-      ) : null}
-
+    <>
       {managerOpen ? (
         <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setManagerOpen(false); }}>
           <div className="modal plugin-manager" role="dialog" aria-modal="true" aria-labelledby="plugin-manager-title">
@@ -399,7 +350,7 @@ export function PluginMenu() {
           </div>
         </div>
       ) : null}
-    </div>
+    </>
   );
 }
 

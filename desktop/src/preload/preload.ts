@@ -242,6 +242,14 @@ export interface RecurringTask {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  getTimers: () => ipcRenderer.invoke('timer:list'),
+  addTimer: (text: string, seconds: number, sound: import('../timerTasks.js').TimerSound) => ipcRenderer.invoke('timer:add', text, seconds, sound),
+  removeTimer: (id: string) => ipcRenderer.invoke('timer:remove', id),
+  onTimersUpdate: (callback: (tasks: import('../timerTasks.js').TimerTask[]) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, tasks: import('../timerTasks.js').TimerTask[]) => callback(tasks);
+    ipcRenderer.on('timer:list-update', listener);
+    return () => ipcRenderer.removeListener('timer:list-update', listener);
+  },
   createSession: (name: string, cmd: string, cwd: string, shellType: ShellType, sshCommand = ''): Promise<Session | null> =>
     ipcRenderer.invoke('session:create', name, cmd, cwd, shellType, sshCommand),
 
@@ -274,6 +282,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   pauseSession: (id: string): Promise<Session | null> =>
     ipcRenderer.invoke('session:pause', id),
+
+  resumeSession: (id: string): Promise<Session | null> =>
+    ipcRenderer.invoke('session:resume', id),
 
   renameSession: (id: string, name: string): Promise<Session | null> =>
     ipcRenderer.invoke('session:rename', id, name),
@@ -420,6 +431,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getInstalledPlugins: (): Promise<PluginId[]> =>
     ipcRenderer.invoke('plugin:list'),
+
+  onOpenPluginManager: (cb: () => void): (() => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('plugin:open-manager', listener);
+    return () => { ipcRenderer.removeListener('plugin:open-manager', listener); };
+  },
 
   setPluginInstalled: (pluginId: PluginId, installed: boolean): Promise<PluginId[]> =>
     ipcRenderer.invoke('plugin:set-installed', pluginId, installed),

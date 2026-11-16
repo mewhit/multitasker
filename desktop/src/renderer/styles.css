@@ -85,6 +85,11 @@
       .plugin-nav {
         position: relative;
       }
+      .nav-menus {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
       .plugin-menu {
         position: absolute;
         top: calc(100% + 7px);
@@ -1126,6 +1131,72 @@
       }
       .form-group textarea:focus {
         border-color: var(--accent);
+      }
+      .form-group .settings-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        min-height: 48px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--bg3);
+        color: var(--text);
+        font-size: 13px;
+        line-height: 1.4;
+        cursor: pointer;
+      }
+      .settings-toggle-control {
+        position: relative;
+        flex: 0 0 68px;
+        width: 68px;
+        height: 32px;
+      }
+      .form-group .settings-toggle-control input {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        opacity: 0;
+        cursor: pointer;
+        z-index: 1;
+      }
+      .settings-toggle-track {
+        position: absolute;
+        inset: 0;
+        border-radius: 999px;
+        background: #53565e;
+        transition: background-color 180ms ease;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 32px;
+      }
+      .settings-toggle-thumb {
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 2px 4px #0004;
+        transition: transform 180ms ease;
+      }
+      .settings-toggle-on { position: absolute; left: 9px; color: #073b1b; opacity: 0; }
+      .settings-toggle-off { position: absolute; right: 7px; color: #fff; }
+      .settings-toggle-control input:checked + .settings-toggle-track { background: #34c759; }
+      .settings-toggle-control input:checked + .settings-toggle-track .settings-toggle-thumb { transform: translateX(36px); }
+      .settings-toggle-control input:checked + .settings-toggle-track .settings-toggle-on { opacity: 1; }
+      .settings-toggle-control input:checked + .settings-toggle-track .settings-toggle-off { opacity: 0; }
+      .settings-toggle-control input:focus-visible + .settings-toggle-track {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .settings-toggle-track, .settings-toggle-thumb { transition: none; }
       }
       .shell-selector {
         display: flex;

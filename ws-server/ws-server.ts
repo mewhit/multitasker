@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { CurrentDirectoryParser } from '../shared-shell/current-directory';
 import type { IncomingMessage } from 'http';
 import { monitorEventLoopDelay } from 'perf_hooks';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -154,6 +155,8 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   /** clientId -> set of session ids this client watches for status. */
   const clientStatusWatches = new Map<string, Set<string>>();
   const analyzer = new OutputAnalyzer();
+  const directoryParsers = new Map<string, CurrentDirectoryParser>();
+  const directorySends = new Map<string, Promise<void>>();
   const httpSessions = new HttpSessionsClient();
   const latestManualTasks: ManualTaskState[] = [];
   let hasManualTasksSnapshot = false;
@@ -588,6 +591,22 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   // Fan out PTY output from the supervisor to attached WS clients (coalesced).
   supervisor.on('output', (sessionId, data) => {
     if (!data || data.length === 0) return;
+    let parser = directoryParsers.get(sessionId);
+    if (!parser) {
+      parser = new CurrentDirectoryParser();
+      directoryParsers.set(sessionId, parser);
+    }
+    const cwd = parser.push(data);
+    if (cwd && multitasker) {
+      const occurredAt = Date.now();
+      const pending = (directorySends.get(sessionId) ?? Promise.resolve())
+        .then(() => multitasker.sendCurrentDirectory(sessionId, cwd, occurredAt))
+        .catch(error => log.warn('current directory update failed', { sessionId, error: String(error) }));
+      directorySends.set(sessionId, pending);
+      void pending.finally(() => {
+        if (directorySends.get(sessionId) === pending) directorySends.delete(sessionId);
+      });
+    }
     let pending = pendingOutput.get(sessionId);
     if (!pending) {
       pending = { parts: [], bytes: 0, scheduled: false };
@@ -616,6 +635,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
     // ahead of the final bytes the PTY produced before exiting.
     flushOutput(sessionId);
     analyzer.reset(sessionId);
+    directoryParsers.delete(sessionId);
     const subs = sessionSubscribers.get(sessionId);
     if (!subs || subs.size === 0) return;
     const msg: ServerMessage = {
@@ -632,6 +652,7 @@ export function startWsServer(supervisor: SupervisorClient): WsServerHandle {
   });
 
   supervisor.on('removed', (sessionId) => {
+    directoryParsers.delete(sessionId);
     log.info('supervisor session removed', { sourceApp: 'shell-supervisor', sessionId });
     pendingOutput.delete(sessionId);
     analyzer.reset(sessionId);

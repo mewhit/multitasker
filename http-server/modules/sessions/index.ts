@@ -10,7 +10,7 @@ import {
   removedSessionIds,
 } from '../../state/sessions';
 import { saveSessions, loadSettings, normalizeClientMetadata } from '../../../shared/settings';
-import { readPayloadString, readPayloadValue, readStringField, readOptionalNumberField } from '../../utils/payload';
+import { readPayloadString, readStringField, readOptionalNumberField } from '../../utils/payload';
 import { isShellType } from '../../utils/types';
 import { flushPendingTerminalUpdates, flushPendingTerminalEvents, forgetRemovedSession, markSessionRemoved, handleTerminalUpdate } from '../terminals/apply';
 import { getSessionsStateToSave } from './parse';
@@ -95,17 +95,30 @@ export const sessionsModule: HttpModule = {
         path: '/api/session/touch',
         handler({ payload, response }) {
           const id = readPayloadString(payload, 'id').trim();
-          const occurredAtValue = readPayloadValue(payload, 'occurredAt');
-          const occurredAt = typeof occurredAtValue === 'number' && Number.isFinite(occurredAtValue) ? occurredAtValue : Date.now();
           if (!id) {
             writeJsonResponse(response, 400, { ok: false, error: 'missing_session_id' });
             return;
           }
-          const existing = sessionManager.getSession(id);
-          const session = existing?.status === 'paused'
-            ? sessionManager.resumePausedSessionFromUserInput(id, occurredAt)
-            : sessionManager.touchSession(id);
+          const session = sessionManager.touchSession(id);
           if (session) saveSessions(getSessionsStateToSave());
+          writeJsonResponse(response, 200, { ok: true, session });
+        },
+      },
+      {
+        method: 'POST',
+        path: '/api/session/resume',
+        handler({ payload, response }) {
+          const id = readPayloadString(payload, 'id').trim();
+          if (!id) {
+            writeJsonResponse(response, 400, { ok: false, error: 'missing_session_id' });
+            return;
+          }
+          const session = sessionManager.resumeSession(id);
+          if (!session) {
+            writeJsonResponse(response, 404, { ok: false, error: 'session_not_found' });
+            return;
+          }
+          saveSessions(getSessionsStateToSave());
           writeJsonResponse(response, 200, { ok: true, session });
         },
       },

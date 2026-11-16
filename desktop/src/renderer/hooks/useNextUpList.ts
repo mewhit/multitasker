@@ -111,7 +111,19 @@ export function useNextUpList() {
     }
   };
 
-  return { items, loading, error, markDone, moveItem, pauseItem };
+  const resumeItem = async (item: NextUpItem): Promise<void> => {
+    if (item.source !== 'session' || item.status !== 'paused') return;
+    try {
+      const session = await window.electronAPI.resumeSession(item.id) as PausedSession | null;
+      if (!session || session.status === 'paused') throw new Error('The session could not be resumed.');
+      updatePausedItem(item.key, session);
+      setError(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to resume session');
+    }
+  };
+
+  return { items, loading, error, markDone, moveItem, pauseItem, resumeItem };
 
   function updatePausedItem(key: string, session: PausedSession): void {
     setItems((prev) => prev.map((candidate) => (

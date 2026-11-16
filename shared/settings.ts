@@ -6,6 +6,7 @@ export type LocalShellType = 'powershell' | 'bash';
 export type ShellType = LocalShellType | 'ssh';
 
 export interface AppSettings {
+  annoyingNotifications: boolean;
   reviewTool: string;
   defaultShell: LocalShellType;
   googleCalendar: GoogleCalendarSettings;
@@ -155,6 +156,7 @@ export interface SlackNotificationState {
 export type { NextUpState };
 
 const DEFAULT_SETTINGS: AppSettings = {
+  annoyingNotifications: false,
   reviewTool: 'code {path}',
   defaultShell: process.platform === 'win32' ? 'powershell' : 'bash',
   googleCalendar: {
@@ -203,6 +205,7 @@ function normalizeSettings(value: unknown): AppSettings {
   return {
     reviewTool,
     defaultShell,
+    annoyingNotifications: value['annoyingNotifications'] === true,
     googleCalendar: normalizeGoogleCalendarSettings(value['googleCalendar']),
     githubReview: normalizeGitHubReviewSettings(value['githubReview']),
     installedPlugins: normalizeInstalledPlugins(value['installedPlugins']),
